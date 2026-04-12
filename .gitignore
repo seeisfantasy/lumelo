@@ -1,0 +1,15 @@
+.DS_Store
+._*
+.idea/
+.vscode/
+
+services/rust/target/
+services/controld/controld
+apps/android-provisioning/.gradle/
+apps/android-provisioning/build/
+apps/android-provisioning/local.properties
+dist/
+out/
+tmp/
+__pycache__/
+*.pyc

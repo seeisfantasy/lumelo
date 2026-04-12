@@ -1,0 +1,22 @@
+[Unit]
+Description=Lumelo Playback Core
+After=local-fs.target
+ConditionPathExists=/usr/bin/playbackd
+
+[Service]
+Type=simple
+Environment=LUMELO_RUNTIME_DIR=/run/lumelo
+ExecStart=/usr/bin/playbackd
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=lumelo
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+StateDirectory=lumelo
+StateDirectoryMode=0755
+CacheDirectory=lumelo
+CacheDirectoryMode=0755
+WorkingDirectory=/var/lib/lumelo
+
+[Install]
+WantedBy=local-mode.target

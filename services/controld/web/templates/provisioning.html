@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lumelo provisioning</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topnav">
+        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
+        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
+        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
+        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+      </nav>
+
+      <section class="card">
+        <p class="eyebrow">Lumelo bring-up</p>
+        <h1>Provisioning status</h1>
+        <p class="summary">
+          This page shows the last BLE to Wi-Fi provisioning state written by
+          the T4 helper so bring-up can be inspected without opening a shell.
+        </p>
+        <p class="summary">
+          While bring-up is in progress, this page auto-refreshes when the
+          provisioning status file changes.
+        </p>
+      </section>
+
+      <section class="card" data-provisioning-updated-at="{{.Provisioning.UpdatedAt}}">
+        <h2>Current State</h2>
+        {{if .Provisioning.Available}}
+          <p class="status-line">
+            Status:
+            {{if eq .Provisioning.State "connected"}}
+              <span class="pill pill-ok">connected</span>
+            {{else if eq .Provisioning.State "failed"}}
+              <span class="pill pill-offline">failed</span>
+            {{else}}
+              <span class="pill pill-current">{{if .Provisioning.State}}{{.Provisioning.State}}{{else}}unknown{{end}}</span>
+            {{end}}
+          </p>
+        {{else}}
+          <p class="status-line">
+            Status:
+            <span class="pill pill-offline">unavailable</span>
+          </p>
+        {{end}}
+
+        <dl class="grid">
+          <div>
+            <dt>Message</dt>
+            <dd>{{if .Provisioning.Message}}{{.Provisioning.Message}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>SSID</dt>
+            <dd>{{if .Provisioning.SSID}}{{.Provisioning.SSID}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>IP</dt>
+            <dd>{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>WebUI</dt>
+            <dd>{{if .Provisioning.WebURL}}<a href="{{.Provisioning.WebURL}}">{{.Provisioning.WebURL}}</a>{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Wi-Fi interface</dt>
+            <dd>{{if .Provisioning.WiFiInterface}}{{.Provisioning.WiFiInterface}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>WPA unit</dt>
+            <dd>{{if .Provisioning.WPAUnit}}{{.Provisioning.WPAUnit}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Hostname</dt>
+            <dd>{{if .Provisioning.Hostname}}{{.Provisioning.Hostname}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Updated at</dt>
+            <dd>{{if .Provisioning.UpdatedAt}}{{.Provisioning.UpdatedAt}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Status file</dt>
+            <dd>{{if .Provisioning.StatusPath}}{{.Provisioning.StatusPath}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Error code</dt>
+            <dd>{{if .Provisioning.ErrorCode}}{{.Provisioning.ErrorCode}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>DHCP wait window</dt>
+            <dd>{{if .Provisioning.IPWaitSeconds}}{{.Provisioning.IPWaitSeconds}} seconds{{else}}-{{end}}</dd>
+          </div>
+        </dl>
+
+        {{if .Provisioning.Error}}
+          <p class="banner banner-error">Provisioning error: {{.Provisioning.Error}}</p>
+        {{end}}
+        {{if .Provisioning.ReadError}}
+          <p class="banner banner-error">Status read error: {{.Provisioning.ReadError}}</p>
+        {{end}}
+        {{if .Provisioning.ApplyOutput}}
+          <p class="summary">Apply output: {{.Provisioning.ApplyOutput}}</p>
+        {{end}}
+        {{if .Provisioning.DiagnosticHint}}
+          <p class="summary">Diagnostic hint: {{.Provisioning.DiagnosticHint}}</p>
+        {{end}}
+
+        <div class="actions log-actions">
+          <a href="/provisioning-status" class="button-link">Open JSON</a>
+          <a href="/healthz" class="button-link button-link-secondary">Healthz</a>
+          <a href="/logs?lines=300" class="button-link button-link-secondary">Logs</a>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Raw JSON</h2>
+        <pre class="log-output">{{.RawJSON}}</pre>
+      </section>
+    </main>
+    <script>
+      (() => {
+        const card = document.querySelector("[data-provisioning-updated-at]");
+        if (!card || !window.fetch) {
+          return;
+        }
+
+        let latestUpdatedAt = card.getAttribute("data-provisioning-updated-at") || "";
+        const poll = async () => {
+          try {
+            const response = await fetch("/provisioning-status", { cache: "no-store" });
+            if (!response.ok) {
+              return;
+            }
+            const payload = await response.json();
+            if (payload && payload.updated_at && payload.updated_at !== latestUpdatedAt) {
+              window.location.reload();
+            }
+          } catch (error) {
+            // Ignore transient refresh errors during bring-up.
+          }
+        };
+
+        window.setInterval(poll, 3000);
+      })();
+    </script>
+  </body>
+</html>

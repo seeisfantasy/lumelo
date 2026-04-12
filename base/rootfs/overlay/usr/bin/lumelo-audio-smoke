@@ -1,0 +1,81 @@
+#!/bin/sh
+set -u
+
+DEVICE=${1:-${LUMELO_AUDIO_DEVICE:-default}}
+RATE=${LUMELO_AUDIO_SMOKE_RATE:-48000}
+CHANNELS=${LUMELO_AUDIO_SMOKE_CHANNELS:-2}
+FORMAT=${LUMELO_AUDIO_SMOKE_FORMAT:-S16_LE}
+FREQUENCY=${LUMELO_AUDIO_SMOKE_FREQUENCY:-1000}
+LOOPS=${LUMELO_AUDIO_SMOKE_LOOPS:-1}
+
+section() {
+  printf '\n## %s\n' "$1"
+}
+
+run() {
+  printf '\n$'
+  for arg in "$@"; do
+    printf ' %s' "$arg"
+  done
+  printf '\n'
+
+  "$@"
+  status=$?
+  if [ "${status}" -ne 0 ]; then
+    printf '[exit %s]\n' "${status}"
+  fi
+  return "${status}"
+}
+
+cat_if_readable() {
+  path=$1
+  printf '\n# %s\n' "${path}"
+  if [ -r "${path}" ]; then
+    cat "${path}"
+  else
+    printf 'not readable\n'
+  fi
+}
+
+command_if_present() {
+  if command -v "$1" >/dev/null 2>&1; then
+    run "$@"
+  else
+    printf '\n$ %s\nnot installed\n' "$1"
+    return 127
+  fi
+}
+
+cat <<EOF
+Lumelo ALSA smoke test
+
+This is a manual bring-up helper. It does not start playbackd, does not enable
+Quiet Mode, and does not change persistent audio configuration.
+
+Target device: ${DEVICE}
+Format: ${FORMAT}, ${RATE} Hz, ${CHANNELS} channel(s), ${FREQUENCY} Hz tone
+EOF
+
+section "ALSA Inventory"
+cat_if_readable /proc/asound/cards
+cat_if_readable /proc/asound/devices
+command_if_present aplay -l || true
+command_if_present aplay -L || true
+
+section "Mixer"
+command_if_present amixer || true
+
+section "Tone"
+if ! command -v speaker-test >/dev/null 2>&1; then
+  printf 'speaker-test is not installed. Rebuild the bring-up image with alsa-utils.\n'
+  exit 127
+fi
+
+run speaker-test \
+  -D "${DEVICE}" \
+  -c "${CHANNELS}" \
+  -r "${RATE}" \
+  -F "${FORMAT}" \
+  -t sine \
+  -f "${FREQUENCY}" \
+  -l "${LOOPS}"

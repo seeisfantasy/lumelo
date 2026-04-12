@@ -1,0 +1,10 @@
+[Service]
+# Template for scan, web, discovery and NAS-adjacent services.
+CPUAffinity=0 1 2 3
+Nice=5
+IOSchedulingClass=idle
+OOMScoreAdjust=300
+MemoryHigh=128M
+MemoryMax=256M
+TasksMax=128
+Environment=MALLOC_ARENA_MAX=2

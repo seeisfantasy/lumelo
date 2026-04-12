@@ -1,0 +1,16 @@
+[Unit]
+Description=Lumelo Bluetooth Wi-Fi Provisioning Service
+After=bluetooth.service dbus.service lumelo-bluetooth-provisioning.service
+Requires=bluetooth.service
+ConditionPathExists=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=lumelo
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

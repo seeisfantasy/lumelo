@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lumelo logs</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topnav">
+        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
+        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
+        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
+        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+      </nav>
+
+      <section class="card">
+        <p class="eyebrow">Lumelo bring-up</p>
+        <h1>System logs</h1>
+        <p class="summary">
+          This page reads the current boot journal on demand so you can copy the
+          latest runtime logs during T4 bring-up without opening an SSH session.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Copy Logs</h2>
+        {{if .LogError}}
+          <p class="banner banner-error">Log read error: {{.LogError}}</p>
+        {{end}}
+        <p class="summary">
+          Showing the latest {{.Lines}} lines from <code>journalctl -b</code>.
+          Use the plain-text view if you want the easiest copy/paste payload.
+        </p>
+        <div class="actions log-actions">
+          <a href="{{.LogTextPath}}" class="button-link">Open plain text</a>
+          <a href="/logs?lines=100" class="button-link button-link-secondary">100 lines</a>
+          <a href="/logs?lines=300" class="button-link button-link-secondary">300 lines</a>
+          <a href="/logs?lines=1000" class="button-link button-link-secondary">1000 lines</a>
+        </div>
+        <pre class="log-output">{{.LogText}}</pre>
+      </section>
+    </main>
+  </body>
+</html>

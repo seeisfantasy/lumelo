@@ -1,0 +1,7 @@
+# Read-only factory defaults.
+
+mode = "local"
+interface_mode = "ethernet"
+dsd_output_policy = "strict_native"
+ssh_enabled = false
+ui_theme = "system"

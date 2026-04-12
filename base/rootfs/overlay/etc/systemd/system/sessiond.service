@@ -1,0 +1,19 @@
+[Unit]
+Description=Lumelo Quiet Mode Session Service
+After=playbackd.service
+Requires=playbackd.service
+ConditionPathExists=/usr/bin/sessiond
+
+[Service]
+Type=simple
+Environment=LUMELO_RUNTIME_DIR=/run/lumelo
+EnvironmentFile=-/etc/lumelo/sessiond.env
+ExecStart=/usr/bin/sessiond
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=lumelo
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=local-mode.target

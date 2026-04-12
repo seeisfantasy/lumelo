@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lumelo library</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topnav">
+        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
+        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
+        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
+        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+      </nav>
+
+      <section class="card">
+        <p class="eyebrow">Lumelo V1</p>
+        <h1>Library overview</h1>
+        <p class="summary">
+          This page reads the current SQLite library state directly from
+          <code>library.db</code> and is intended to validate the current index
+          layer and media boundaries.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Playback Boundary</h2>
+        <p class="summary">
+          New TF or USB media can be mounted while you listen, but full scan
+          remains blocked during playback. Stop playback first, then trigger the
+          next manual scan.
+        </p>
+        <dl class="grid">
+          <div>
+            <dt>Playback state</dt>
+            <dd>{{if .PlaybackStatus.State}}{{.PlaybackStatus.State}}{{else}}unknown{{end}}</dd>
+          </div>
+          <div>
+            <dt>Current track</dt>
+            <dd>{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}-{{end}}</dd>
+          </div>
+        </dl>
+        {{if .PlaybackScanBlock}}
+          <p class="banner banner-warn">
+            Playback Quiet Mode is active. If you just inserted new media, do
+            not expect new albums to appear yet. Stop playback, then run the
+            next manual scan.
+          </p>
+        {{else}}
+          <p class="summary">
+            Playback is not currently blocking scan. New media still requires a
+            manual scan before album results become complete.
+          </p>
+        {{end}}
+      </section>
+
+      <section class="card">
+        <h2>Library Status</h2>
+        <p class="status-line">
+          Database:
+          {{if .LibrarySnapshot.Available}}
+            <span class="pill pill-ok">online</span>
+          {{else}}
+            <span class="pill pill-offline">offline</span>
+          {{end}}
+        </p>
+        <dl class="grid">
+          <div>
+            <dt>Library database</dt>
+            <dd>{{.LibraryDBPath}}</dd>
+          </div>
+          <div>
+            <dt>Volumes</dt>
+            <dd>{{.LibrarySnapshot.Stats.VolumeCount}}</dd>
+          </div>
+          <div>
+            <dt>Albums</dt>
+            <dd>{{.LibrarySnapshot.Stats.AlbumCount}}</dd>
+          </div>
+          <div>
+            <dt>Tracks</dt>
+            <dd>{{.LibrarySnapshot.Stats.TrackCount}}</dd>
+          </div>
+          <div>
+            <dt>Artists</dt>
+            <dd>{{.LibrarySnapshot.Stats.ArtistCount}}</dd>
+          </div>
+          <div>
+            <dt>Genres</dt>
+            <dd>{{.LibrarySnapshot.Stats.GenreCount}}</dd>
+          </div>
+        </dl>
+        {{if .LibrarySnapshot.Error}}
+          <p class="summary">Last library query error: {{.LibrarySnapshot.Error}}</p>
+        {{end}}
+      </section>
+
+      <section class="card">
+        <h2>Volumes</h2>
+        {{if .VolumeEntries}}
+          <div class="library-list">
+            {{range .VolumeEntries}}
+              <article class="library-item">
+                <p class="library-title">
+                  {{.Label}}
+                  {{if .IsAvailable}}
+                    <span class="pill pill-ok">mounted</span>
+                  {{else}}
+                    <span class="pill pill-offline">missing</span>
+                  {{end}}
+                </p>
+                <p class="library-meta">uuid {{.VolumeUUID}}</p>
+                <p class="library-meta">{{.MountPath}}</p>
+                <p class="library-meta">last seen {{.LastSeenAt}}</p>
+              </article>
+            {{end}}
+          </div>
+        {{else if .LibrarySnapshot.Available}}
+          <p class="summary">No indexed volumes yet.</p>
+        {{else}}
+          <p class="summary">Library database is unavailable.</p>
+        {{end}}
+      </section>
+
+      <section class="card">
+        <h2>Albums</h2>
+        {{if .AlbumEntries}}
+          <div class="library-list">
+            {{range .AlbumEntries}}
+              <article class="library-item">
+                <p class="library-title">{{.Title}}</p>
+                <p class="library-meta">{{.AlbumArtist}} · {{.YearLabel}} · {{.TrackCount}} tracks · {{.DurationLabel}}</p>
+                <p class="library-meta">{{.RootDirHint}}</p>
+                <p class="library-meta">thumb {{.CoverThumb}}</p>
+              </article>
+            {{end}}
+          </div>
+        {{else if .LibrarySnapshot.Available}}
+          <p class="summary">No indexed albums yet.</p>
+        {{else}}
+          <p class="summary">Library database is unavailable.</p>
+        {{end}}
+      </section>
+
+      <section class="card">
+        <h2>Tracks</h2>
+        {{if .TrackEntries}}
+          <div class="library-list">
+            {{range .TrackEntries}}
+              <article class="library-item">
+                <p class="library-title">{{.Title}}</p>
+                <p class="library-meta">{{.Artist}} · {{.FormatLabel}} · {{.DurationLabel}}</p>
+                <p class="library-meta">{{.RelativePath}}</p>
+              </article>
+            {{end}}
+          </div>
+        {{else if .LibrarySnapshot.Available}}
+          <p class="summary">No indexed tracks yet.</p>
+        {{else}}
+          <p class="summary">Library database is unavailable.</p>
+        {{end}}
+      </section>
+    </main>
+  </body>
+</html>

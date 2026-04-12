@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+echo "Lumelo Bluetooth provisioning mode"
+
+if ! command -v bluetoothctl >/dev/null 2>&1; then
+  echo "bluetoothctl is unavailable; skipping Bluetooth provisioning mode" >&2
+  exit 0
+fi
+
+if ! command -v rfkill >/dev/null 2>&1; then
+  echo "rfkill is unavailable; continuing without unblock step" >&2
+else
+  rfkill unblock bluetooth || true
+  rfkill unblock all || true
+fi
+
+if command -v hciconfig >/dev/null 2>&1; then
+  hciconfig hci0 up || true
+  hciconfig hci0 name "Lumelo T4" || true
+  hciconfig hci0 piscan || true
+fi
+
+bluetoothctl <<'EOF' || true
+power on
+system-alias Lumelo T4
+discoverable-timeout 0
+pairable on
+discoverable on
+show
+EOF

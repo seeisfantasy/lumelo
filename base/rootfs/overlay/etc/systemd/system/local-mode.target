@@ -1,0 +1,9 @@
+[Unit]
+Description=Lumelo Local Mode Target
+Documentation=file:/usr/share/lumelo/default_config.toml
+Wants=auth-recovery.service playbackd.service sessiond.service media-indexd.service controld.service
+After=auth-recovery.service playbackd.service sessiond.service media-indexd.service controld.service
+AllowIsolate=yes
+
+[Install]
+WantedBy=multi-user.target

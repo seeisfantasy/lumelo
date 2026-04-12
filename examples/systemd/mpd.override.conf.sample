@@ -1,0 +1,14 @@
+[Service]
+# Keep playback work on the big cores once the CPU map is verified.
+CPUAffinity=4 5
+Nice=-11
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+OOMScoreAdjust=-900
+TasksMax=64
+LimitRTPRIO=70
+LimitMEMLOCK=64M
+
+# Enable only after driver and long-run stability validation.
+# CPUSchedulingPolicy=fifo
+# CPUSchedulingPriority=45

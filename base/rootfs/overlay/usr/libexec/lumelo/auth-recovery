@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+marker_name="${MARKER_NAME:-RESET_ADMIN_PASSWORD}"
+scan_root="${RECOVERY_SCAN_ROOT:-/media}"
+state_dir="${LUMELO_STATE_DIR:-${PRODUCT_STATE_DIR:-/var/lib/lumelo}}"
+config_path="${LUMELO_CONFIG_PATH:-${PRODUCT_CONFIG_PATH:-/etc/lumelo/config.toml}}"
+
+printf '%s\n' "auth-recovery placeholder: scan ${scan_root} for ${marker_name}" >&2
+printf '%s\n' "auth-recovery placeholder: reset credentials in ${state_dir} and keep ${config_path} intact" >&2
+
+# Real implementation will:
+# 1. find a FAT32 TF/USB recovery medium
+# 2. detect the exact marker file in the root directory
+# 3. clear password/session state
+# 4. disable SSH
+# 5. hand control back to controld first-boot setup
+
+exit 0

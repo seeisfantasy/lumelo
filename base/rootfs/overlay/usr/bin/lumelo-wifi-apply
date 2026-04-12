@@ -1,0 +1,263 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  echo "usage: lumelo-wifi-apply <ssid> <password>" >&2
+  echo "   or: lumelo-wifi-apply --psk-hex <64-hex-psk> <ssid>" >&2
+  exit 64
+}
+
+escape_wpa_string() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+is_networkmanager_active() {
+  if ! command -v nmcli >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl is-active --quiet NetworkManager.service && return 0
+    systemctl is-active --quiet NetworkManager && return 0
+  fi
+
+  nmcli general status >/dev/null 2>&1
+}
+
+find_nmcli_wifi_iface() {
+  if ! command -v nmcli >/dev/null 2>&1; then
+    return 1
+  fi
+
+  nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '
+    $2 == "wifi" && $1 !~ /^p2p-dev/ {
+      print $1
+      exit
+    }
+  '
+}
+
+find_iw_wifi_iface() {
+  if ! command -v iw >/dev/null 2>&1; then
+    return 1
+  fi
+
+  iw dev 2>/dev/null | awk '
+    $1 == "Interface" && $2 !~ /^p2p-dev/ {
+      print $2
+      exit
+    }
+  '
+}
+
+find_sysfs_wifi_iface() {
+  for pattern in /sys/class/net/wlan* /sys/class/net/wl*; do
+    [ -e "${pattern}" ] || continue
+    if [ -d "${pattern}/wireless" ]; then
+      basename "${pattern}"
+      return 0
+    fi
+  done
+
+  for candidate in /sys/class/net/*; do
+    [ -e "${candidate}" ] || continue
+    iface=$(basename "${candidate}")
+    case "${iface}" in
+      p2p-dev*|lo)
+        continue
+        ;;
+    esac
+
+    if [ -d "${candidate}/wireless" ]; then
+      printf '%s\n' "${iface}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+detect_wifi_iface() {
+  if [ -n "${LUMELO_WIFI_IFACE:-}" ]; then
+    printf '%s\n' "${LUMELO_WIFI_IFACE}"
+    return 0
+  fi
+
+  if [ -n "${WIFI_INTERFACE:-}" ]; then
+    printf '%s\n' "${WIFI_INTERFACE}"
+    return 0
+  fi
+
+  iface=$(find_nmcli_wifi_iface || true)
+  if [ -n "${iface:-}" ]; then
+    printf '%s\n' "${iface}"
+    return 0
+  fi
+
+  iface=$(find_iw_wifi_iface || true)
+  if [ -n "${iface:-}" ]; then
+    printf '%s\n' "${iface}"
+    return 0
+  fi
+
+  find_sysfs_wifi_iface
+}
+
+selected_backend() {
+  backend=${LUMELO_WIFI_BACKEND:-auto}
+  case "${backend}" in
+    auto)
+      if is_networkmanager_active; then
+        printf 'networkmanager\n'
+      else
+        printf 'wpa_supplicant\n'
+      fi
+      ;;
+    networkmanager|wpa_supplicant)
+      printf '%s\n' "${backend}"
+      ;;
+    *)
+      echo "Unsupported Wi-Fi backend: ${backend}" >&2
+      exit 64
+      ;;
+  esac
+}
+
+apply_with_networkmanager() {
+  connection_name=${LUMELO_WIFI_CONNECTION_NAME:-lumelo-${WIFI_IFACE}}
+
+  if [ -n "${PSK_HEX:-}" ]; then
+    echo "NetworkManager backend does not support pre-derived WPA-PSK input" >&2
+    exit 64
+  fi
+
+  if ! command -v nmcli >/dev/null 2>&1; then
+    echo "nmcli is unavailable" >&2
+    exit 69
+  fi
+
+  nmcli radio wifi on >/dev/null 2>&1 || true
+  nmcli device set "${WIFI_IFACE}" managed yes >/dev/null 2>&1 || true
+  nmcli connection delete id "${connection_name}" >/dev/null 2>&1 || true
+
+  if ! nmcli --wait 45 device wifi connect "${SSID}" password "${PASSWORD}" \
+    ifname "${WIFI_IFACE}" name "${connection_name}"; then
+    echo "NetworkManager failed to connect interface ${WIFI_IFACE} to SSID: ${SSID}" >&2
+    exit 70
+  fi
+
+  echo "Wi-Fi credentials applied with NetworkManager for SSID: ${SSID} on interface: ${WIFI_IFACE}"
+}
+
+apply_with_wpasupplicant() {
+  conf=/etc/wpa_supplicant/wpa_supplicant-${WIFI_IFACE}.conf
+
+  install -d -m 0755 /etc/wpa_supplicant
+  tmp=$(mktemp "/etc/wpa_supplicant/.lumelo-${WIFI_IFACE}.XXXXXX")
+  trap 'rm -f "${tmp}"' EXIT
+
+  if [ -n "${PSK_HEX:-}" ]; then
+    {
+      printf 'ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev\n'
+      printf 'update_config=1\n'
+      printf 'country=%s\n\n' "${COUNTRY}"
+      printf 'network={\n'
+      printf '    ssid="%s"\n' "$(escape_wpa_string "${SSID}")"
+      printf '    psk=%s\n' "${PSK_HEX}"
+      printf '}\n'
+    } > "${tmp}"
+  else
+    if ! command -v wpa_passphrase >/dev/null 2>&1; then
+      echo "wpa_passphrase is unavailable" >&2
+      exit 69
+    fi
+
+    {
+      printf 'ctrl_interface=DIR=/run/wpa_supplicant GROUP=netdev\n'
+      printf 'update_config=1\n'
+      printf 'country=%s\n\n' "${COUNTRY}"
+      wpa_passphrase "${SSID}" "${PASSWORD}" | sed '/^[[:space:]]*#psk=/d'
+    } > "${tmp}"
+  fi
+
+  chmod 0600 "${tmp}"
+  mv "${tmp}" "${conf}"
+  trap - EXIT
+
+  systemctl enable "wpa_supplicant@${WIFI_IFACE}.service" >/dev/null 2>&1 || true
+  systemctl restart "wpa_supplicant@${WIFI_IFACE}.service" >/dev/null 2>&1 || true
+  if command -v networkctl >/dev/null 2>&1; then
+    networkctl reload >/dev/null 2>&1 || true
+    networkctl reconfigure "${WIFI_IFACE}" >/dev/null 2>&1 || true
+  fi
+
+  if [ -n "${PSK_HEX:-}" ]; then
+    echo "Wi-Fi PSK written for SSID: ${SSID} on interface: ${WIFI_IFACE}"
+  else
+    echo "Wi-Fi credentials written for SSID: ${SSID} on interface: ${WIFI_IFACE}"
+  fi
+}
+
+PSK_HEX=
+PASSWORD=
+
+case "${1:-}" in
+  --psk-hex)
+    if [ "$#" -ne 3 ]; then
+      usage
+    fi
+    PSK_HEX=$2
+    SSID=$3
+    ;;
+  "")
+    usage
+    ;;
+  *)
+    if [ "$#" -ne 2 ]; then
+      usage
+    fi
+    SSID=$1
+    PASSWORD=$2
+    ;;
+esac
+
+COUNTRY=${WIFI_COUNTRY:-00}
+WIFI_IFACE=$(detect_wifi_iface) || {
+  echo "No wireless interface found for Wi-Fi provisioning" >&2
+  exit 69
+}
+BACKEND=$(selected_backend)
+
+if [ -z "${SSID}" ]; then
+  echo "SSID must not be empty" >&2
+  exit 64
+fi
+
+if [ -n "${PSK_HEX}" ]; then
+  case "${PSK_HEX}" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+      ;;
+    *)
+      echo "WPA-PSK hex must be 64 hexadecimal characters" >&2
+      exit 64
+      ;;
+  esac
+  if [ "${#PSK_HEX}" -ne 64 ]; then
+    echo "WPA-PSK hex must be 64 hexadecimal characters" >&2
+    exit 64
+  fi
+else
+  if [ "${#PASSWORD}" -lt 8 ] || [ "${#PASSWORD}" -gt 63 ]; then
+    echo "WPA-PSK password must be 8..63 characters" >&2
+    exit 64
+  fi
+fi
+
+case "${BACKEND}" in
+  networkmanager)
+    apply_with_networkmanager
+    ;;
+  wpa_supplicant)
+    apply_with_wpasupplicant
+    ;;
+esac

@@ -1,0 +1,31 @@
+# Minimal package set for the first Lumelo-defined T4 bring-up rootfs.
+# This profile favors a clean systemd/network stack and local diagnostics.
+
+alsa-utils
+bash
+bluez
+ca-certificates
+curl
+dbus
+firmware-brcm80211
+firmware-misc-nonfree
+iw
+iproute2
+iputils-ping
+kmod
+libnss-resolve
+libnss-systemd
+netbase
+passwd
+procps
+python3
+python3-dbus
+python3-gi
+rfkill
+systemd
+systemd-resolved
+systemd-sysv
+systemd-timesyncd
+udev
+wireless-regdb
+wpasupplicant

@@ -1,0 +1,16 @@
+[Unit]
+Description=Lumelo Bluetooth UART Attach
+After=local-fs.target systemd-modules-load.service
+Wants=systemd-modules-load.service
+Before=bluetooth.service lumelo-bluetooth-provisioning.service lumelo-wifi-provisiond.service
+ConditionPathExists=/usr/bin/hciattach.rk
+ConditionPathExists=/usr/libexec/lumelo/bluetooth-uart-attach
+ConditionPathExists=/dev/ttyS0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/lumelo/bluetooth-uart-attach
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

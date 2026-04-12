@@ -1,0 +1,228 @@
+#!/bin/sh
+set -u
+
+OUT=${1:-/tmp/lumelo-t4-report.txt}
+
+detect_wifi_iface() {
+  if [ -n "${LUMELO_WIFI_IFACE:-}" ]; then
+    printf '%s\n' "${LUMELO_WIFI_IFACE}"
+    return 0
+  fi
+
+  if [ -n "${WIFI_INTERFACE:-}" ]; then
+    printf '%s\n' "${WIFI_INTERFACE}"
+    return 0
+  fi
+
+  if command -v iw >/dev/null 2>&1; then
+    iface=$(iw dev 2>/dev/null | awk '$1 == "Interface" && $2 !~ /^p2p-dev/ { print $2; exit }')
+    if [ -n "${iface:-}" ]; then
+      printf '%s\n' "${iface}"
+      return 0
+    fi
+  fi
+
+  for candidate in /sys/class/net/*; do
+    iface=$(basename "${candidate}")
+    case "${iface}" in
+      p2p-dev*|lo)
+        continue
+        ;;
+    esac
+    if [ -d "${candidate}/wireless" ]; then
+      printf '%s\n' "${iface}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+section() {
+  printf '\n## %s\n' "$1"
+}
+
+run() {
+  printf '\n$'
+  for arg in "$@"; do
+    printf ' %s' "$arg"
+  done
+  printf '\n'
+
+  "$@"
+  status=$?
+  if [ "${status}" -ne 0 ]; then
+    printf '[exit %s]\n' "${status}"
+  fi
+}
+
+cat_if_readable() {
+  path=$1
+  printf '\n# %s\n' "${path}"
+  if [ -r "${path}" ]; then
+    cat "${path}"
+  else
+    printf 'not readable\n'
+  fi
+}
+
+command_if_present() {
+  if command -v "$1" >/dev/null 2>&1; then
+    run "$@"
+  else
+    printf '\n$ %s\nnot installed\n' "$1"
+  fi
+}
+
+emit_dmesg_tail() {
+  if command -v dmesg >/dev/null 2>&1 && command -v tail >/dev/null 2>&1; then
+    printf '\n$ dmesg -T | tail -n 200\n'
+    dmesg -T 2>&1 | tail -n 200
+  else
+    command_if_present dmesg -T
+  fi
+}
+
+emit_keyword_dmesg_tail() {
+  if ! command -v dmesg >/dev/null 2>&1; then
+    return
+  fi
+
+  printf '\n$ dmesg -T | grep -Ei %s | tail -n 200\n' "$1"
+  dmesg -T 2>&1 | grep -Ei "$1" | tail -n 200 || true
+}
+
+emit_report() {
+  wifi_iface=$(detect_wifi_iface || true)
+
+  section "Lumelo T4 Bring-Up Report"
+  run date -u
+  run uname -a
+  cat_if_readable /etc/os-release
+  cat_if_readable /etc/lumelo/image-build.txt
+  cat_if_readable /proc/cmdline
+
+  section "Storage"
+  command_if_present lsblk -f
+  run df -h
+  run mount
+
+  section "Network"
+  run ip addr
+  run ip route
+  command_if_present networkctl status --no-pager
+  command_if_present nmcli general status
+  command_if_present nmcli device status
+  command_if_present ss -lntup
+  command_if_present rfkill list
+  command_if_present iw dev
+  cat_if_readable /etc/NetworkManager/NetworkManager.conf
+  cat_if_readable /etc/NetworkManager/conf.d/12-managed-wifi.conf
+  cat_if_readable /etc/NetworkManager/conf.d/99-unmanaged-wlan1.conf
+  cat_if_readable /etc/NetworkManager/conf.d/disable-random-mac-during-wifi-scan.conf
+  cat_if_readable /etc/network/interfaces
+  command_if_present bluetoothctl show
+  if [ -n "${wifi_iface}" ]; then
+    run ip addr show dev "${wifi_iface}"
+    command_if_present networkctl status "${wifi_iface}" --no-pager
+  fi
+
+  section "Bluetooth / Firmware"
+  command_if_present systemctl cat bluetooth.service
+  if [ -d /etc/systemd/system/bluetooth.service.d ]; then
+    run ls -l /etc/systemd/system/bluetooth.service.d
+  fi
+  cat_if_readable /etc/systemd/system/bluetooth.service.d/10-lumelo-rfkill-unblock.conf
+  cat_if_readable /etc/systemd/system/bluetooth.service.d/20-lumelo-uart-attach.conf
+  cat_if_readable /etc/systemd/system/lumelo-bluetooth-uart-attach.service
+  if [ -d /lib/firmware/brcm ]; then
+    run ls -l /lib/firmware/brcm
+  fi
+  if [ -d /lib/firmware/rtl_bt ]; then
+    run ls -l /lib/firmware/rtl_bt
+  fi
+  emit_keyword_dmesg_tail 'bluetooth|brcm|hci|firmware|rfkill'
+
+  section "Lumelo Files"
+  run ls -l /usr/bin/playbackd /usr/bin/sessiond /usr/bin/media-indexd /usr/bin/controld
+  command_if_present ls -l \
+    /usr/bin/lumelo-t4-report \
+    /usr/bin/lumelo-audio-smoke \
+    /usr/bin/hciattach.rk \
+    /usr/bin/lumelo-bluetooth-provisioning-mode \
+    /usr/bin/lumelo-wifi-apply \
+    /usr/libexec/lumelo/bluetooth-uart-attach \
+    /usr/libexec/lumelo/classic-bluetooth-wifi-provisiond \
+    /usr/libexec/lumelo/bluetooth-wifi-provisiond
+  run ls -l /etc/lumelo
+  run ls -l /run/lumelo
+  run ls -l /var/lib/lumelo
+  run ls -l /var/cache/lumelo
+  cat_if_readable /run/lumelo/provisioning-status.json
+
+  section "Systemd"
+  command_if_present systemctl --failed --no-pager
+  if [ -d /etc/systemd/system/ssh.service.d ]; then
+    run ls -l /etc/systemd/system/ssh.service.d
+  fi
+  cat_if_readable /etc/systemd/system/ssh.service.d/10-lumelo-hostkeys.conf
+  for unit in \
+    local-mode.target \
+    playbackd.service \
+    sessiond.service \
+    media-indexd.service \
+    controld.service \
+    lumelo-bluetooth-uart-attach.service \
+    bluetooth.service \
+    lumelo-bluetooth-provisioning.service \
+    lumelo-wifi-provisiond.service \
+    systemd-networkd.service \
+    systemd-resolved.service \
+    ssh.service
+  do
+    command_if_present systemctl status "${unit}" --no-pager --lines=40
+  done
+  if [ -n "${wifi_iface}" ]; then
+    command_if_present systemctl status "wpa_supplicant@${wifi_iface}.service" --no-pager --lines=40
+  fi
+  if [ "${wifi_iface}" != "wlan0" ]; then
+    command_if_present systemctl status wpa_supplicant@wlan0.service --no-pager --lines=40
+  fi
+
+  section "Lumelo Journals"
+  for unit in playbackd.service sessiond.service media-indexd.service controld.service lumelo-bluetooth-uart-attach.service bluetooth.service lumelo-bluetooth-provisioning.service lumelo-wifi-provisiond.service; do
+    command_if_present journalctl -u "${unit}" -b --no-pager -n 100
+  done
+  if [ -n "${wifi_iface}" ]; then
+    command_if_present journalctl -u "wpa_supplicant@${wifi_iface}.service" -b --no-pager -n 100
+  fi
+  if [ "${wifi_iface}" != "wlan0" ]; then
+    command_if_present journalctl -u wpa_supplicant@wlan0.service -b --no-pager -n 100
+  fi
+
+  section "Audio"
+  cat_if_readable /proc/asound/cards
+  cat_if_readable /proc/asound/devices
+  command_if_present aplay -l
+  command_if_present amixer
+  if [ -d /sys/class/sound ]; then
+    run ls -l /sys/class/sound
+  fi
+
+  section "Kernel Tail"
+  emit_dmesg_tail
+
+  section "WebUI Loopback"
+  command_if_present curl -sS --max-time 2 http://127.0.0.1:18080/healthz
+  command_if_present curl -sS -I --max-time 2 http://127.0.0.1:18080/
+  command_if_present curl -sS --max-time 2 http://127.0.0.1:18080/
+}
+
+if [ "${OUT}" = "-" ]; then
+  emit_report
+else
+  out_dir=$(dirname "${OUT}")
+  mkdir -p "${out_dir}" 2>/dev/null || true
+  emit_report > "${OUT}" 2>&1
+  printf 'Lumelo T4 report written to %s\n' "${OUT}"
+fi

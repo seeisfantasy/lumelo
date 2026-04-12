@@ -1,0 +1,985 @@
+#!/usr/bin/env python3
+import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import socket
+import subprocess
+import sys
+import threading
+import time
+from shutil import which
+
+
+PROVISIONING_ALIAS = "Lumelo T4"
+SPP_SERVICE_UUID = "00001101-0000-1000-8000-00805F9B34FB"
+RFCOMM_CHANNEL = int(os.environ.get("LUMELO_BT_RFCOMM_CHANNEL", "1"))
+DEFAULT_IP_WAIT_SECONDS = 45
+CREDENTIAL_SCHEME = "dh-hmac-sha256-stream-v1"
+DH_GROUP_NAME = "modp14-sha256"
+DH_PRIME = int(
+    "".join(
+        [
+            "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08",
+            "8A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD",
+            "3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E",
+            "7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899F",
+            "A5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF05",
+            "98DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C",
+            "62F356208552BB9ED529077096966D670C354E4ABC9804F174",
+            "6C08CA18217C32905E462E36CE3BE39E772C180E86039B2783",
+            "A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497C",
+            "EA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFF",
+            "FFFFFFFF",
+        ]
+    ),
+    16,
+)
+DH_GENERATOR = 2
+DH_PUBLIC_KEY_BYTES = (DH_PRIME.bit_length() + 7) // 8
+PRIVATE_KEY_BYTES = 32
+NONCE_BYTES = 16
+MAC_BYTES = hashlib.sha256().digest_size
+DERIVED_KEY_BYTES = 64
+HKDF_SALT_LABEL = b"lumelo-bt-session-salt-v1"
+HKDF_INFO_LABEL = b"lumelo-bt-credentials-v1"
+STREAM_LABEL = b"lumelo-bt-stream-v1"
+MAC_LABEL = b"lumelo-bt-mac-v1"
+WPA_PSK_BYTES = 32
+
+
+def encode_base64(value):
+    return base64.b64encode(value).decode("ascii")
+
+
+def decode_base64(value):
+    try:
+        return base64.b64decode(value.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise ValueError(f"invalid base64 payload: {exc}") from exc
+
+
+def fixed_public_bytes(value):
+    return int(value).to_bytes(DH_PUBLIC_KEY_BYTES, "big")
+
+
+def random_private_key():
+    while True:
+        candidate = int.from_bytes(secrets.token_bytes(PRIVATE_KEY_BYTES), "big")
+        if 2 <= candidate <= DH_PRIME - 2:
+            return candidate
+
+
+def validate_peer_public_key(value):
+    if value < 2 or value > DH_PRIME - 2:
+        raise ValueError("peer public key is outside the allowed range")
+
+
+def hmac_sha256(key, message):
+    return hmac.new(key, message, hashlib.sha256).digest()
+
+
+def hkdf_expand(prk, info, output_length):
+    output = bytearray()
+    previous = b""
+    counter = 1
+    while len(output) < output_length:
+        previous = hmac_sha256(prk, previous + info + bytes([counter]))
+        output.extend(previous)
+        counter += 1
+    return bytes(output[:output_length])
+
+
+def derive_transport_keys(shared_secret, session_id, server_nonce, client_nonce):
+    salt = HKDF_SALT_LABEL + server_nonce + client_nonce
+    prk = hmac_sha256(salt, shared_secret)
+    okm = hkdf_expand(prk, HKDF_INFO_LABEL + session_id.encode("ascii"), DERIVED_KEY_BYTES)
+    return okm[:32], okm[32:64]
+
+
+def xor_with_stream(data, stream_key, message_nonce):
+    output = bytearray(len(data))
+    offset = 0
+    counter = 0
+    while offset < len(data):
+        block = hmac_sha256(
+            stream_key, STREAM_LABEL + message_nonce + counter.to_bytes(4, "big")
+        )
+        chunk = min(len(block), len(data) - offset)
+        for index in range(chunk):
+            output[offset + index] = data[offset + index] ^ block[index]
+        offset += chunk
+        counter += 1
+    return bytes(output)
+
+
+def append_length_prefixed(parts, value):
+    parts.append(len(value).to_bytes(4, "big"))
+    parts.append(value)
+
+
+def credential_mac(session_id, server_nonce, client_nonce, message_nonce, client_public, ciphertext, mac_key):
+    parts = []
+    append_length_prefixed(parts, MAC_LABEL)
+    append_length_prefixed(parts, session_id.encode("ascii"))
+    append_length_prefixed(parts, server_nonce)
+    append_length_prefixed(parts, client_nonce)
+    append_length_prefixed(parts, message_nonce)
+    append_length_prefixed(parts, client_public)
+    append_length_prefixed(parts, ciphertext)
+    return hmac_sha256(mac_key, b"".join(parts))
+
+
+def derive_wpa_psk_hex(ssid, password):
+    return hashlib.pbkdf2_hmac(
+        "sha1",
+        password.encode("utf-8"),
+        ssid.encode("utf-8"),
+        4096,
+        WPA_PSK_BYTES,
+    ).hex()
+
+
+class SecurityContext:
+    def __init__(self):
+        self.session_id = encode_base64(secrets.token_bytes(12))
+        self.server_nonce = secrets.token_bytes(NONCE_BYTES)
+        self.server_private = random_private_key()
+        self.server_public = pow(DH_GENERATOR, self.server_private, DH_PRIME)
+
+    def hello_payload(self):
+        return {
+            "scheme": CREDENTIAL_SCHEME,
+            "dh_group": DH_GROUP_NAME,
+            "session_id": self.session_id,
+            "server_nonce": encode_base64(self.server_nonce),
+            "server_public_key": encode_base64(fixed_public_bytes(self.server_public)),
+        }
+
+    def decrypt_credentials(self, payload):
+        scheme = payload.get("scheme", "")
+        group = payload.get("dh_group", "")
+        session_id = payload.get("session_id", "")
+        if scheme != CREDENTIAL_SCHEME or group != DH_GROUP_NAME:
+            raise ValueError("unsupported encrypted credential scheme")
+        if session_id != self.session_id:
+            raise ValueError("credential session mismatch")
+
+        client_public = decode_base64(payload.get("client_public_key", ""))
+        client_nonce = decode_base64(payload.get("client_nonce", ""))
+        message_nonce = decode_base64(payload.get("message_nonce", ""))
+        ciphertext = decode_base64(payload.get("ciphertext", ""))
+        mac_value = decode_base64(payload.get("mac", ""))
+
+        if len(client_public) != DH_PUBLIC_KEY_BYTES:
+            raise ValueError("invalid client public key length")
+        if len(client_nonce) != NONCE_BYTES or len(message_nonce) != NONCE_BYTES:
+            raise ValueError("invalid credential nonce length")
+        if len(mac_value) != MAC_BYTES:
+            raise ValueError("invalid credential mac length")
+
+        client_public_int = int.from_bytes(client_public, "big")
+        validate_peer_public_key(client_public_int)
+        shared_secret = fixed_public_bytes(pow(client_public_int, self.server_private, DH_PRIME))
+        stream_key, mac_key = derive_transport_keys(
+            shared_secret, self.session_id, self.server_nonce, client_nonce
+        )
+        expected_mac = credential_mac(
+            self.session_id,
+            self.server_nonce,
+            client_nonce,
+            message_nonce,
+            client_public,
+            ciphertext,
+            mac_key,
+        )
+        if not hmac.compare_digest(expected_mac, mac_value):
+            raise ValueError("credential integrity check failed")
+
+        plaintext = xor_with_stream(ciphertext, stream_key, message_nonce)
+        try:
+            credentials = json.loads(plaintext.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"invalid encrypted credential payload: {exc}") from exc
+
+        if not isinstance(credentials, dict):
+            raise ValueError("encrypted credentials must decode to an object")
+        return credentials
+
+
+def current_ip():
+    wifi_interface = detect_wireless_interface()
+    if wifi_interface:
+        wifi_ip = current_ip_for_interface(wifi_interface)
+        if wifi_ip:
+            return wifi_ip
+
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return ""
+
+    for candidate in result.stdout.split():
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    return ""
+
+
+def current_all_ips():
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return []
+
+    addresses = []
+    for candidate in result.stdout.split():
+        if candidate and not candidate.startswith("127."):
+            addresses.append(candidate)
+    return addresses
+
+
+def current_wired_ip():
+    try:
+        for candidate in sorted(os.listdir("/sys/class/net")):
+            if candidate in ("lo", detect_wireless_interface()) or candidate.startswith("p2p-dev"):
+                continue
+            if os.path.isdir(os.path.join("/sys/class/net", candidate, "wireless")):
+                continue
+            address = current_ip_for_interface(candidate)
+            if address:
+                return address
+    except FileNotFoundError:
+        return ""
+    return ""
+
+
+def current_ip_for_interface(interface):
+    if not interface:
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "dev", interface, "scope", "global"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return ""
+
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        for index, field in enumerate(fields):
+            if field == "inet" and index + 1 < len(fields):
+                return fields[index + 1].split("/", 1)[0]
+    return ""
+
+
+def runtime_dir():
+    return (
+        os.environ.get("LUMELO_RUNTIME_DIR")
+        or os.environ.get("PRODUCT_RUNTIME_DIR")
+        or "/run/lumelo"
+    )
+
+
+def provisioning_status_path():
+    return os.path.join(runtime_dir(), "provisioning-status.json")
+
+
+def detect_wireless_interface():
+    override = os.environ.get("LUMELO_WIFI_IFACE") or os.environ.get("WIFI_INTERFACE")
+    if override:
+        return override
+
+    if which("nmcli"):
+        try:
+            result = subprocess.run(
+                ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+        except Exception:
+            result = None
+
+        if result:
+            for line in result.stdout.splitlines():
+                parts = line.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                device, device_type = parts
+                if device_type == "wifi" and not device.startswith("p2p-dev"):
+                    return device
+
+    if which("iw"):
+        try:
+            result = subprocess.run(
+                ["iw", "dev"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+        except Exception:
+            result = None
+
+        if result:
+            lines = iter(result.stdout.splitlines())
+            for line in lines:
+                fields = line.strip().split()
+                if len(fields) == 2 and fields[0] == "Interface":
+                    candidate = fields[1]
+                    if not candidate.startswith("p2p-dev"):
+                        return candidate
+
+    try:
+        for candidate in sorted(os.listdir("/sys/class/net")):
+            if candidate.startswith("p2p-dev") or candidate == "lo":
+                continue
+            path = os.path.join("/sys/class/net", candidate, "wireless")
+            if os.path.isdir(path):
+                return candidate
+    except FileNotFoundError:
+        return ""
+    return ""
+
+
+def wpa_unit_name(interface):
+    if not interface:
+        return ""
+    return f"wpa_supplicant@{interface}.service"
+
+
+def ip_wait_seconds():
+    raw = os.environ.get("LUMELO_WIFI_IP_WAIT_SECONDS", str(DEFAULT_IP_WAIT_SECONDS))
+    try:
+        return max(5, int(raw))
+    except ValueError:
+        return DEFAULT_IP_WAIT_SECONDS
+
+
+def iso_timestamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def normalize_summary(text, limit=240):
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def diagnostic_hint(interface):
+    if interface:
+        return (
+            f"Check {wpa_unit_name(interface)}, "
+            f"networkctl status {interface}, "
+            "and /run/lumelo/provisioning-status.json"
+        )
+    return (
+        "Check /run/lumelo/provisioning-status.json and the bluetooth / wifi journal logs"
+    )
+
+
+def build_status_payload(
+    state,
+    message,
+    ip="",
+    ssid="",
+    wifi_interface="",
+    error="",
+    error_code="",
+    apply_output="",
+    diagnostic="",
+):
+    wifi_ip = current_ip_for_interface(wifi_interface) if wifi_interface else ""
+    wired_ip = current_wired_ip()
+    return {
+        "state": state,
+        "message": message,
+        "ssid": ssid,
+        "ip": ip,
+        "wifi_ip": wifi_ip,
+        "wired_ip": wired_ip,
+        "all_ips": current_all_ips(),
+        "web_url": f"http://{ip}:18080/" if ip else "",
+        "hostname": socket.gethostname(),
+        "wifi_interface": wifi_interface,
+        "wpa_unit": wpa_unit_name(wifi_interface),
+        "status_path": provisioning_status_path(),
+        "updated_at": iso_timestamp(),
+        "error": error,
+        "error_code": error_code,
+        "apply_output": apply_output,
+        "ip_wait_seconds": ip_wait_seconds(),
+        "diagnostic_hint": diagnostic or diagnostic_hint(wifi_interface),
+    }
+
+
+def write_status_file(payload):
+    path = provisioning_status_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"))
+        handle.write("\n")
+    os.replace(tmp_path, path)
+
+
+def write_bootstrap_status(
+    state,
+    message,
+    wifi_interface="",
+    ip="",
+    ssid="",
+    error="",
+    error_code="",
+    apply_output="",
+):
+    try:
+        write_status_file(
+            build_status_payload(
+                state,
+                message,
+                ip=ip,
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error=error,
+                error_code=error_code,
+                apply_output=apply_output,
+            )
+        )
+    except Exception as exc:
+        print(f"Failed to write provisioning status file: {exc}", file=sys.stderr)
+
+
+def configure_classic_adapter():
+    if which("hciconfig"):
+        subprocess.run(["hciconfig", "hci0", "up"], check=False)
+        subprocess.run(["hciconfig", "hci0", "name", PROVISIONING_ALIAS], check=False)
+        subprocess.run(["hciconfig", "hci0", "piscan"], check=False)
+
+    if which("bluetoothctl"):
+        bluetoothctl_script = "\n".join(
+            [
+                "power on",
+                "pairable on",
+                "discoverable-timeout 0",
+                "discoverable on",
+                f"system-alias {PROVISIONING_ALIAS}",
+                "show",
+                "quit",
+            ]
+        )
+        subprocess.run(
+            ["bluetoothctl"],
+            input=bluetoothctl_script,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+
+def controller_address():
+    try:
+        result = subprocess.run(
+            ["hciconfig", "-a", "hci0"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return ""
+
+    match = re.search(r"BD Address:\s*([0-9A-F:]{17})", result.stdout)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def register_spp_service():
+    if not which("sdptool"):
+        raise RuntimeError("sdptool is unavailable")
+    subprocess.run(
+        ["sdptool", "add", f"--channel={RFCOMM_CHANNEL}", "SP"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+class ClientConnection:
+    def __init__(self, sock, remote_info, status_hub):
+        self.sock = sock
+        self.remote_info = remote_info
+        self.status_hub = status_hub
+        self.security_context = SecurityContext()
+        self.write_lock = threading.Lock()
+        self.reader = sock.makefile("r", encoding="utf-8", newline="\n")
+        self.writer = sock.makefile("w", encoding="utf-8", newline="\n")
+        self.closed = False
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.reader.close()
+        except Exception:
+            pass
+        try:
+            self.writer.close()
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+    def send_json(self, payload):
+        if self.closed:
+            raise OSError("connection closed")
+        text = json.dumps(payload, separators=(",", ":"))
+        with self.write_lock:
+            self.writer.write(text)
+            self.writer.write("\n")
+            self.writer.flush()
+
+
+class StatusHub:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.listeners = set()
+        self.pending_wait_token = 0
+        self.state = build_status_payload(
+            "idle",
+            "waiting for credentials",
+            wifi_interface=detect_wireless_interface(),
+        )
+        write_status_file(self.state)
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.state)
+
+    def add_listener(self, listener):
+        with self.lock:
+            self.listeners.add(listener)
+
+    def remove_listener(self, listener):
+        with self.lock:
+            self.listeners.discard(listener)
+
+    def broadcast_status(self):
+        snapshot = self.snapshot()
+        listeners = self._listeners_snapshot()
+        payload = {"type": "status", "payload": snapshot}
+        for listener in listeners:
+            try:
+                listener.send_json(payload)
+            except Exception:
+                self.remove_listener(listener)
+                listener.close()
+
+    def _listeners_snapshot(self):
+        with self.lock:
+            return list(self.listeners)
+
+    def cancel_pending_wait(self):
+        with self.lock:
+            self.pending_wait_token += 1
+            return self.pending_wait_token
+
+    def set_state(
+        self,
+        state,
+        message,
+        ip="",
+        ssid="",
+        wifi_interface="",
+        error="",
+        error_code="",
+        apply_output="",
+        diagnostic="",
+    ):
+        with self.lock:
+            if not ssid:
+                ssid = self.state.get("ssid", "")
+            if not wifi_interface:
+                wifi_interface = detect_wireless_interface() or self.state.get("wifi_interface", "")
+            if not apply_output:
+                apply_output = self.state.get("apply_output", "")
+            if not diagnostic:
+                diagnostic = diagnostic_hint(wifi_interface)
+            self.state = build_status_payload(
+                state,
+                message,
+                ip=ip,
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error=error,
+                error_code=error_code,
+                apply_output=apply_output,
+                diagnostic=diagnostic,
+            )
+            snapshot = dict(self.state)
+        write_status_file(snapshot)
+        self.broadcast_status()
+
+    def begin_wait_for_ip(self, ssid, wifi_interface, apply_output=""):
+        token = self.cancel_pending_wait()
+        interface = wifi_interface or detect_wireless_interface()
+        waiting_message = (
+            f"credentials applied for {ssid}; waiting for DHCP on {interface}"
+            if interface
+            else f"credentials applied for {ssid}; waiting for DHCP"
+        )
+        self.set_state(
+            "waiting_for_ip",
+            waiting_message,
+            ssid=ssid,
+            wifi_interface=interface,
+            apply_output=apply_output,
+            diagnostic=diagnostic_hint(interface),
+        )
+
+        def worker():
+            deadline = time.monotonic() + ip_wait_seconds()
+            while True:
+                with self.lock:
+                    if token != self.pending_wait_token:
+                        return
+                current_interface = interface or detect_wireless_interface()
+                ip = current_ip_for_interface(current_interface)
+                if ip:
+                    self.set_state(
+                        "connected",
+                        f"wifi connected on {current_interface}" if current_interface else "wifi connected",
+                        ip=ip,
+                        ssid=ssid,
+                        wifi_interface=current_interface,
+                        apply_output=apply_output,
+                        diagnostic="Open /provisioning, /healthz, and /logs from the phone browser",
+                    )
+                    return
+                if time.monotonic() >= deadline:
+                    target = current_interface if current_interface else "wireless interface"
+                    self.set_state(
+                        "failed",
+                        f"timed out waiting for DHCP on {target}",
+                        ssid=ssid,
+                        wifi_interface=current_interface,
+                        error="dhcp_timeout",
+                        error_code="dhcp_timeout",
+                        apply_output=apply_output,
+                        diagnostic=diagnostic_hint(current_interface),
+                    )
+                    return
+                time.sleep(1)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+class ProvisioningServer:
+    def __init__(self):
+        self.credentials_lock = threading.Lock()
+        self.credentials = {}
+        self.status = StatusHub()
+
+    def device_info_payload(self):
+        wifi_interface = detect_wireless_interface()
+        wifi_ip = current_ip_for_interface(wifi_interface)
+        wired_ip = current_wired_ip()
+        ip = wifi_ip or wired_ip or current_ip()
+        return {
+            "name": PROVISIONING_ALIAS,
+            "hostname": socket.gethostname(),
+            "ip": ip,
+            "wifi_ip": wifi_ip,
+            "wired_ip": wired_ip,
+            "all_ips": current_all_ips(),
+            "wifi_interface": wifi_interface,
+            "status_path": provisioning_status_path(),
+            "web_port": 18080,
+            "transport": "classic_bluetooth",
+        }
+
+    def handle_credentials(self, payload):
+        ssid = payload.get("ssid", "")
+        password = payload.get("password", "")
+        if not ssid or not password:
+            raise ValueError("ssid and password are required")
+        if len(password) < 8 or len(password) > 63:
+            raise ValueError("WPA-PSK password must be 8..63 characters")
+        wifi_interface = detect_wireless_interface()
+        wpa_psk_hex = derive_wpa_psk_hex(ssid, password)
+        with self.credentials_lock:
+            self.credentials = {
+                "ssid": ssid,
+                "wpa_psk_hex": wpa_psk_hex,
+                "wifi_interface": wifi_interface,
+            }
+        self.status.cancel_pending_wait()
+        self.status.set_state(
+            "credentials_ready",
+            "credentials received",
+            ssid=ssid,
+            wifi_interface=wifi_interface,
+            diagnostic=diagnostic_hint(wifi_interface),
+        )
+
+    def handle_apply(self):
+        with self.credentials_lock:
+            credentials = dict(self.credentials)
+        ssid = credentials.get("ssid", "")
+        wpa_psk_hex = credentials.get("wpa_psk_hex", "")
+        wifi_interface = credentials.get("wifi_interface") or detect_wireless_interface()
+        if not ssid or not wpa_psk_hex:
+            self.status.set_state("failed", "missing credentials", wifi_interface=wifi_interface)
+            raise ValueError("missing credentials")
+
+        self.status.cancel_pending_wait()
+        self.status.set_state(
+            "applying",
+            f"applying credentials for {ssid}",
+            ssid=ssid,
+            wifi_interface=wifi_interface,
+            diagnostic=diagnostic_hint(wifi_interface),
+        )
+
+        try:
+            result = subprocess.run(
+                ["/usr/bin/lumelo-wifi-apply", "--psk-hex", wpa_psk_hex, ssid],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+        except Exception as exc:
+            apply_output = normalize_summary(str(exc))
+            self.status.set_state(
+                "failed",
+                str(exc),
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error="wifi_apply_exception",
+                error_code="wifi_apply_exception",
+                apply_output=apply_output,
+                diagnostic=diagnostic_hint(wifi_interface),
+            )
+            return
+
+        apply_output = normalize_summary(result.stdout or result.stderr or "")
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "wifi apply failed").strip()
+            self.status.set_state(
+                "failed",
+                message,
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error=f"wifi_apply_exit_{result.returncode}",
+                error_code=f"wifi_apply_exit_{result.returncode}",
+                apply_output=apply_output,
+                diagnostic=diagnostic_hint(wifi_interface),
+            )
+            return
+
+        self.status.begin_wait_for_ip(ssid, wifi_interface, apply_output)
+
+
+def bind_address():
+    address = controller_address()
+    if address:
+        return address
+    return getattr(socket, "BDADDR_ANY", "00:00:00:00:00:00")
+
+
+def run_server():
+    if not hasattr(socket, "AF_BLUETOOTH"):
+        message = "Python bluetooth socket support is unavailable"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=detect_wireless_interface(),
+            error="missing_bluetooth_socket_support",
+            error_code="missing_bluetooth_socket_support",
+        )
+        print(message, file=sys.stderr)
+        return 1
+
+    configure_classic_adapter()
+    register_spp_service()
+
+    server = ProvisioningServer()
+    server.status.set_state(
+        "advertising",
+        "ready for classic bluetooth provisioning",
+        wifi_interface=detect_wireless_interface(),
+        diagnostic="Use the Android app to scan for Lumelo T4 over classic bluetooth",
+    )
+
+    listen_socket = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    listen_socket.bind((bind_address(), RFCOMM_CHANNEL))
+    listen_socket.listen(1)
+    print(
+        f"Lumelo classic bluetooth provisioning listening on channel {RFCOMM_CHANNEL} "
+        f"as {PROVISIONING_ALIAS}",
+        flush=True,
+    )
+
+    while True:
+        client_socket, remote_info = listen_socket.accept()
+        connection = ClientConnection(client_socket, remote_info, server.status)
+        threading.Thread(
+            target=serve_client,
+            args=(connection, server),
+            daemon=True,
+        ).start()
+
+
+def serve_client(connection, server):
+    remote_label = str(connection.remote_info)
+    server.status.add_listener(connection)
+    try:
+        connection.send_json(
+            {
+                "type": "hello",
+                "transport": "classic_bluetooth",
+                "protocol": "lumelo-json-v2",
+                "name": PROVISIONING_ALIAS,
+                "channel": RFCOMM_CHANNEL,
+                "service_uuid": SPP_SERVICE_UUID,
+                "security": connection.security_context.hello_payload(),
+            }
+        )
+        connection.send_json({"type": "status", "payload": server.status.snapshot()})
+
+        for raw_line in connection.reader:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                command = json.loads(line)
+            except json.JSONDecodeError as exc:
+                connection.send_json(
+                    {
+                        "type": "error",
+                        "code": "invalid_json",
+                        "message": f"invalid JSON: {exc.msg}",
+                    }
+                )
+                continue
+
+            command_type = command.get("type", "")
+            if command_type == "device_info":
+                connection.send_json(
+                    {"type": "device_info", "payload": server.device_info_payload()}
+                )
+                continue
+
+            if command_type == "status":
+                connection.send_json({"type": "status", "payload": server.status.snapshot()})
+                continue
+
+            if command_type == "wifi_credentials":
+                connection.send_json(
+                    {
+                        "type": "error",
+                        "code": "plaintext_credentials_disabled",
+                        "message": (
+                            "plaintext Wi-Fi credential payloads are disabled; "
+                            "use wifi_credentials_encrypted"
+                        ),
+                    }
+                )
+                continue
+
+            if command_type == "wifi_credentials_encrypted":
+                payload = command.get("payload") or {}
+                try:
+                    decrypted_payload = connection.security_context.decrypt_credentials(payload)
+                    server.handle_credentials(decrypted_payload)
+                except ValueError as exc:
+                    connection.send_json(
+                        {
+                            "type": "error",
+                            "code": "invalid_encrypted_credentials",
+                            "message": str(exc),
+                        }
+                    )
+                    continue
+                connection.send_json({"type": "ack", "message": "credentials received"})
+                continue
+
+            if command_type == "apply":
+                try:
+                    server.handle_apply()
+                except ValueError as exc:
+                    connection.send_json(
+                        {
+                            "type": "error",
+                            "code": "missing_credentials",
+                            "message": str(exc),
+                        }
+                    )
+                    continue
+                connection.send_json({"type": "ack", "message": "apply started"})
+                continue
+
+            connection.send_json(
+                {
+                    "type": "error",
+                    "code": "unknown_command",
+                    "message": f"unknown command: {command_type or '(empty)'}",
+                }
+            )
+    except Exception as exc:
+        print(f"classic bluetooth client {remote_label} disconnected: {exc}", file=sys.stderr)
+    finally:
+        server.status.remove_listener(connection)
+        connection.close()
+
+
+def main():
+    try:
+        return run_server()
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        message = f"classic bluetooth provisioning failed: {exc}"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=detect_wireless_interface(),
+            error="classic_bluetooth_server_failed",
+            error_code="classic_bluetooth_server_failed",
+        )
+        print(message, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

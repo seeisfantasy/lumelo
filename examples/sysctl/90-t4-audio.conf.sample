@@ -1,0 +1,10 @@
+# Conservative first-pass sysctl baseline for an audio-focused RK3399 system.
+# Start here, measure, then tighten or relax.
+
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+vm.min_free_kbytes = 65536
+
+# Cap dirty data so flash writeback does not build up into large bursts.
+vm.dirty_background_bytes = 16777216
+vm.dirty_bytes = 67108864

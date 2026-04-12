@@ -1,0 +1,16 @@
+[workspace]
+members = [
+  "crates/playbackd",
+  "crates/sessiond",
+  "crates/media-indexd",
+  "crates/ipc-proto",
+  "crates/media-model",
+  "crates/artwork-cache",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+authors = ["Codex"]

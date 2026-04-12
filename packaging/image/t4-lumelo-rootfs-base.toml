@@ -1,0 +1,22 @@
+[base]
+profile = "t4-bringup"
+strategy = "lumelo_defined_rootfs_with_friendly_bootchain"
+board_vendor = "FriendlyELEC"
+board_model = "NanoPC-T4"
+soc = "RK3399"
+board_source_image_family = "rk3399-sd-debian-trixie-core-4.19-arm64-YYYYMMDD.img.gz"
+board_source_role = "borrow p1-p7 boot-chain partitions plus matching kernel modules/firmware"
+rootfs_suite = "trixie"
+rootfs_variant = "minbase"
+rootfs_size_mib = 1024
+userdata_size_mib = 128
+
+[rootfs]
+packages_manifest = "base/rootfs/manifests/t4-bringup-packages.txt"
+postbuild_hook = "base/rootfs/hooks/t4-bringup-postbuild.sh"
+overlay_root = "base/rootfs/overlay"
+
+[notes]
+why_this_profile = "First Lumelo-defined rootfs image for T4 hardware bring-up without carrying the full official userdata partition."
+board_support_bridge = "Until FriendlyELEC board-support artifacts are checked into base/board-support/friendly, the builder copies boot-chain partitions and matching runtime kernel modules from the selected official image."
+expected_outcome = "A smaller TF image that boots with FriendlyELEC board support while all userspace above the kernel is Lumelo-owned."

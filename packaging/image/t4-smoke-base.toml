@@ -1,0 +1,46 @@
+[base]
+profile = "t4-smoke"
+strategy = "remaster_official_sd_image"
+board_vendor = "FriendlyELEC"
+board_model = "NanoPC-T4"
+soc = "RK3399"
+official_wiki = "https://wiki.friendlyelec.com/wiki/index.php/NanoPC-T4"
+official_download_page = "https://download.friendlyelec.com/NanoPC-T4"
+official_image_family = "rk3399-sd-debian-trixie-core-4.19-arm64-YYYYMMDD.img.gz"
+official_image_note = "Debian 13 Core, no desktop environment, command line only"
+locked_update_log_date = "2026-01-12"
+kernel_line = "4.19.y"
+uboot_line = "v2017.09"
+partition_layout = "GPT"
+rootfs_partition_number = 8
+boot_partition_number = 7
+
+[board_support]
+packaging_tool = "sd-fuse_rk3399"
+packaging_tool_branch = "kernel-4.19"
+kernel_repo = "https://github.com/friendlyarm/kernel-rockchip"
+kernel_branch = "nanopi4-v4.19.y"
+kernel_defconfig = "nanopi4_linux_defconfig"
+uboot_repo = "https://github.com/friendlyarm/uboot-rockchip"
+uboot_branch = "nanopi4-v2017.09"
+uboot_defconfig = "nanopi4_defconfig"
+
+[smoke_scope]
+goal = "first bootable TF smoke image for T4 bring-up"
+includes = [
+  "Ethernet DHCP",
+  "SSH when base image already provides ssh.service",
+  "Lumelo systemd overlay",
+  "playbackd/sessiond/media-indexd/controld binaries",
+  "library/list placeholder validation",
+]
+excludes = [
+  "real ALSA output",
+  "USB DAC or I2S validation",
+  "eMMC flashing",
+  "recovery/update pipeline",
+]
+
+[notes]
+why_this_base = "Fastest path to a bootable T4 validation image while preserving the long-term direction of FriendlyELEC board support plus Lumelo-owned upper layers."
+long_term_direction = "The smoke image uses an official FriendlyELEC SD image as the shortest bring-up shortcut. The long-term V1 direction remains FriendlyELEC board support plus Lumelo-defined rootfs."

@@ -1,0 +1,101 @@
+#!/bin/sh
+set -eu
+
+ATTACH_HELPER=${LUMELO_BT_ATTACH_HELPER:-/usr/bin/hciattach.rk}
+ATTACH_UART=${LUMELO_BT_TTY:-/dev/ttyS0}
+ATTACH_CHIPSET=${LUMELO_BT_CHIPSET:-bcm43xx}
+ATTACH_BAUD=${LUMELO_BT_BAUD:-1500000}
+ATTACH_RETRIES=${LUMELO_BT_ATTACH_RETRIES:-5}
+ATTACH_RETRY_DELAY=${LUMELO_BT_ATTACH_RETRY_DELAY:-5}
+ATTACH_POWER_SETTLE_DELAY=${LUMELO_BT_POWER_SETTLE_DELAY:-0}
+ATTACH_READY_PATHS=${LUMELO_BT_READY_PATHS:-/sys/module/bcmdhd}
+
+unblock_bluetooth_rfkill() {
+  if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock bluetooth || true
+  fi
+
+  if [ -w /sys/class/rfkill/rfkill0/state ]; then
+    printf '1\n' > /sys/class/rfkill/rfkill0/state || true
+  fi
+
+  rm -f /dev/rfkill || true
+
+  for type_path in /sys/class/rfkill/rfkill*/type; do
+    [ -f "${type_path}" ] || continue
+    if [ "$(cat "${type_path}" 2>/dev/null)" = "bluetooth" ]; then
+      state_path=$(dirname "${type_path}")/state
+      if [ -w "${state_path}" ]; then
+        printf '1\n' > "${state_path}" || true
+      fi
+    fi
+  done
+}
+
+controller_ready() {
+  if ! command -v btmgmt >/dev/null 2>&1; then
+    return 1
+  fi
+
+  info_output=""
+  if command -v timeout >/dev/null 2>&1; then
+    info_output=$(timeout 5 btmgmt info 2>/dev/null || true)
+  else
+    info_output=$(btmgmt info 2>/dev/null || true)
+  fi
+
+  printf '%s\n' "${info_output}" | grep -Eq '^hci[0-9]+:'
+}
+
+find_ready_path() {
+  for ready_path in ${ATTACH_READY_PATHS}; do
+    if [ -e "${ready_path}" ]; then
+      printf '%s\n' "${ready_path}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+wait_for_ready_paths() {
+  attempt=1
+  while [ "${attempt}" -le "${ATTACH_RETRIES}" ]; do
+    if ready_path=$(find_ready_path); then
+      echo "detected wireless readiness marker before bluetooth attach: ${ready_path}" >&2
+      return 0
+    fi
+
+    echo "[${attempt}/${ATTACH_RETRIES}] waiting for wireless readiness markers before bluetooth attach" >&2
+    sleep "${ATTACH_RETRY_DELAY}"
+    attempt=$((attempt + 1))
+  done
+
+  echo "expected wireless readiness markers did not appear before bluetooth attach" >&2
+  return 1
+}
+
+if [ ! -x "${ATTACH_HELPER}" ]; then
+  echo "bluetooth UART attach helper is unavailable: ${ATTACH_HELPER}" >&2
+  exit 1
+fi
+
+if [ ! -e "${ATTACH_UART}" ]; then
+  echo "bluetooth UART device is unavailable: ${ATTACH_UART}" >&2
+  exit 1
+fi
+
+if controller_ready; then
+  echo "bluetooth controller already available; skipping UART attach" >&2
+  exit 0
+fi
+
+wait_for_ready_paths
+
+unblock_bluetooth_rfkill
+
+if [ "${ATTACH_POWER_SETTLE_DELAY}" != "0" ]; then
+  sleep "${ATTACH_POWER_SETTLE_DELAY}"
+fi
+
+exec "${ATTACH_HELPER}" "${ATTACH_UART}" "${ATTACH_CHIPSET}" "${ATTACH_BAUD}"

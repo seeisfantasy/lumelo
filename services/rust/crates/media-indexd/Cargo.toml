@@ -1,0 +1,13 @@
+[package]
+name = "media-indexd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+artwork-cache = { path = "../artwork-cache" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+ipc-proto = { path = "../ipc-proto" }
+lofty = "0.21"
+rusqlite = { version = "0.32", features = ["bundled"] }
