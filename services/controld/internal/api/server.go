@@ -20,15 +20,16 @@ import (
 )
 
 type Dependencies struct {
-	Auth         *auth.Service
-	Playback     *playbackclient.Client
-	Library      *libraryclient.Client
-	Logs         LogSource
-	Provisioning ProvisioningSource
-	Settings     settings.Config
-	SSH          *sshctl.Controller
-	Templates    fs.FS
-	Static       fs.FS
+	Auth             *auth.Service
+	Playback         *playbackclient.Client
+	Library          *libraryclient.Client
+	Logs             LogSource
+	Provisioning     ProvisioningSource
+	Settings         settings.Config
+	SSH              *sshctl.Controller
+	Templates        fs.FS
+	Static           fs.FS
+	ArtworkCacheRoot string
 }
 
 type LogSource interface {
@@ -108,13 +109,14 @@ type libraryVolumeView struct {
 }
 
 type libraryAlbumView struct {
-	Title         string
-	AlbumArtist   string
-	YearLabel     string
-	TrackCount    int
-	DurationLabel string
-	RootDirHint   string
-	CoverThumb    string
+	Title           string
+	AlbumArtist     string
+	YearLabel       string
+	TrackCount      int
+	DurationLabel   string
+	RootDirHint     string
+	CoverThumbLabel string
+	CoverThumbPath  string
 }
 
 type libraryTrackView struct {
@@ -166,6 +168,9 @@ func New(deps Dependencies) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+	if deps.ArtworkCacheRoot != "" {
+		mux.Handle("/artwork/", http.StripPrefix("/artwork/", http.FileServer(http.Dir(deps.ArtworkCacheRoot))))
+	}
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -202,6 +207,7 @@ func New(deps Dependencies) (*Server, error) {
 	renderHome := func(w http.ResponseWriter, r *http.Request, commandMessage, commandError string) {
 		status := deps.Playback.Status(r.Context())
 		queueSnapshot := deps.Playback.QueueSnapshot(r.Context())
+		librarySnapshot := deps.Library.Snapshot(r.Context())
 		provisioningSnapshot := provisioning.Snapshot(r.Context())
 
 		data := homeViewData{
@@ -221,7 +227,7 @@ func New(deps Dependencies) (*Server, error) {
 			CurrentOrderLabel:  currentOrderLabel(queueSnapshot),
 			CommandMessage:     commandMessage,
 			CommandError:       commandError,
-			SuggestedTrackID:   suggestedTrackID(status),
+			SuggestedTrackID:   suggestedTrackID(status, librarySnapshot),
 			PlaybackStreamPath: "/events/playback",
 			Provisioning:       provisioningSnapshot,
 		}
@@ -457,9 +463,12 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
-func suggestedTrackID(status playbackclient.Status) string {
+func suggestedTrackID(status playbackclient.Status, snapshot libraryclient.Snapshot) string {
 	if status.CurrentTrack != "" {
 		return status.CurrentTrack
+	}
+	if len(snapshot.Tracks) > 0 && snapshot.Tracks[0].TrackUID != "" {
+		return snapshot.Tracks[0].TrackUID
 	}
 
 	return "demo-track-001"
@@ -553,14 +562,20 @@ func buildLibraryVolumeViews(snapshot libraryclient.Snapshot) []libraryVolumeVie
 func buildLibraryAlbumViews(snapshot libraryclient.Snapshot) []libraryAlbumView {
 	views := make([]libraryAlbumView, 0, len(snapshot.Albums))
 	for _, album := range snapshot.Albums {
+		coverThumbLabel := fallback(album.CoverThumbRelPath, "-")
+		coverThumbPath := ""
+		if album.CoverThumbRelPath != "" {
+			coverThumbPath = "/artwork/" + album.CoverThumbRelPath
+		}
 		views = append(views, libraryAlbumView{
-			Title:         album.Title,
-			AlbumArtist:   album.AlbumArtist,
-			YearLabel:     intLabel(album.Year),
-			TrackCount:    album.TrackCount,
-			DurationLabel: durationMSLabel(album.TotalDurationMS),
-			RootDirHint:   fallback(album.RootDirHint, "-"),
-			CoverThumb:    fallback(album.CoverThumbRelPath, "-"),
+			Title:           album.Title,
+			AlbumArtist:     album.AlbumArtist,
+			YearLabel:       intLabel(album.Year),
+			TrackCount:      album.TrackCount,
+			DurationLabel:   durationMSLabel(album.TotalDurationMS),
+			RootDirHint:     fallback(album.RootDirHint, "-"),
+			CoverThumbLabel: coverThumbLabel,
+			CoverThumbPath:  coverThumbPath,
 		})
 	}
 

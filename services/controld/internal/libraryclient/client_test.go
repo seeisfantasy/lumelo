@@ -6,12 +6,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestSnapshotReadsLibraryOverview(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}

@@ -62,6 +62,18 @@
             <dd>{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
           </div>
           <div>
+            <dt>Wi-Fi IP</dt>
+            <dd>{{if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Wired IP</dt>
+            <dd>{{if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>All IPs</dt>
+            <dd>{{if .Provisioning.AllIPs}}{{range $index, $ip := .Provisioning.AllIPs}}{{if $index}}, {{end}}{{$ip}}{{end}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
             <dt>WebUI</dt>
             <dd>{{if .Provisioning.WebURL}}<a href="{{.Provisioning.WebURL}}">{{.Provisioning.WebURL}}</a>{{else}}-{{end}}</dd>
           </div>

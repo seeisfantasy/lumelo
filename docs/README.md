@@ -11,6 +11,8 @@
   - 看 [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)
   - 看 [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
   - 看 [apps/android-provisioning/README.md](/Volumes/SeeDisk/Codex/Lumelo/apps/android-provisioning/README.md)
+- 给外部 AI 做静态工程审查：
+  - 看 `docs/review/`
 - T4 真机 bring-up、无线金样、板级排障：
   - 看 [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
   - 看 [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)
@@ -35,6 +37,8 @@
   - T4 真机 bring-up 与烧录后核查清单
 - [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)
   - T4 无线金样与 Lumelo 当前差异
+- `docs/review/`
+  - 给外部 AI 使用的静态审查文档包
 
 ## Archived Docs
 

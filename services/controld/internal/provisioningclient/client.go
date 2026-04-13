@@ -12,6 +12,9 @@ type Snapshot struct {
 	Message        string `json:"message,omitempty"`
 	SSID           string `json:"ssid,omitempty"`
 	IP             string `json:"ip,omitempty"`
+	WiFiIP         string `json:"wifi_ip,omitempty"`
+	WiredIP        string `json:"wired_ip,omitempty"`
+	AllIPs         []string `json:"all_ips,omitempty"`
 	WebURL         string `json:"web_url,omitempty"`
 	Hostname       string `json:"hostname,omitempty"`
 	WiFiInterface  string `json:"wifi_interface,omitempty"`

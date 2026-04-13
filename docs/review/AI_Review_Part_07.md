@@ -1,0 +1,905 @@
+# AI Review Part 07
+
+这是给外部 AI 做静态审查的代码分卷。每一卷都只包含仓库快照中的一部分文本文件内容，按当前工作树生成。
+
+## `base/rootfs/overlay/usr/libexec/lumelo/bluetooth-uart-attach`
+
+- bytes: 2633
+- segment: 1/1
+
+~~~text
+#!/bin/sh
+set -eu
+
+ATTACH_HELPER=${LUMELO_BT_ATTACH_HELPER:-/usr/bin/hciattach.rk}
+ATTACH_UART=${LUMELO_BT_TTY:-/dev/ttyS0}
+ATTACH_CHIPSET=${LUMELO_BT_CHIPSET:-bcm43xx}
+ATTACH_BAUD=${LUMELO_BT_BAUD:-1500000}
+ATTACH_RETRIES=${LUMELO_BT_ATTACH_RETRIES:-5}
+ATTACH_RETRY_DELAY=${LUMELO_BT_ATTACH_RETRY_DELAY:-5}
+ATTACH_POWER_SETTLE_DELAY=${LUMELO_BT_POWER_SETTLE_DELAY:-0}
+ATTACH_READY_PATHS=${LUMELO_BT_READY_PATHS:-/sys/module/bcmdhd}
+
+unblock_bluetooth_rfkill() {
+  if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock bluetooth || true
+  fi
+
+  if [ -w /sys/class/rfkill/rfkill0/state ]; then
+    printf '1\n' > /sys/class/rfkill/rfkill0/state || true
+  fi
+
+  rm -f /dev/rfkill || true
+
+  for type_path in /sys/class/rfkill/rfkill*/type; do
+    [ -f "${type_path}" ] || continue
+    if [ "$(cat "${type_path}" 2>/dev/null)" = "bluetooth" ]; then
+      state_path=$(dirname "${type_path}")/state
+      if [ -w "${state_path}" ]; then
+        printf '1\n' > "${state_path}" || true
+      fi
+    fi
+  done
+}
+
+controller_ready() {
+  if ! command -v btmgmt >/dev/null 2>&1; then
+    return 1
+  fi
+
+  info_output=""
+  if command -v timeout >/dev/null 2>&1; then
+    info_output=$(timeout 5 btmgmt info 2>/dev/null || true)
+  else
+    info_output=$(btmgmt info 2>/dev/null || true)
+  fi
+
+  printf '%s\n' "${info_output}" | grep -Eq '^hci[0-9]+:'
+}
+
+find_ready_path() {
+  for ready_path in ${ATTACH_READY_PATHS}; do
+    if [ -e "${ready_path}" ]; then
+      printf '%s\n' "${ready_path}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+wait_for_ready_paths() {
+  attempt=1
+  while [ "${attempt}" -le "${ATTACH_RETRIES}" ]; do
+    if ready_path=$(find_ready_path); then
+      echo "detected wireless readiness marker before bluetooth attach: ${ready_path}" >&2
+      return 0
+    fi
+
+    echo "[${attempt}/${ATTACH_RETRIES}] waiting for wireless readiness markers before bluetooth attach" >&2
+    sleep "${ATTACH_RETRY_DELAY}"
+    attempt=$((attempt + 1))
+  done
+
+  echo "expected wireless readiness markers did not appear before bluetooth attach" >&2
+  return 1
+}
+
+if [ ! -x "${ATTACH_HELPER}" ]; then
+  echo "bluetooth UART attach helper is unavailable: ${ATTACH_HELPER}" >&2
+  exit 1
+fi
+
+if [ ! -e "${ATTACH_UART}" ]; then
+  echo "bluetooth UART device is unavailable: ${ATTACH_UART}" >&2
+  exit 1
+fi
+
+if controller_ready; then
+  echo "bluetooth controller already available; skipping UART attach" >&2
+  exit 0
+fi
+
+wait_for_ready_paths
+
+unblock_bluetooth_rfkill
+
+if [ "${ATTACH_POWER_SETTLE_DELAY}" != "0" ]; then
+  sleep "${ATTACH_POWER_SETTLE_DELAY}"
+fi
+
+exec "${ATTACH_HELPER}" "${ATTACH_UART}" "${ATTACH_CHIPSET}" "${ATTACH_BAUD}"
+~~~
+
+## `base/rootfs/overlay/usr/libexec/lumelo/bluetooth-wifi-provisiond`
+
+- bytes: 24985
+- segment: 1/1
+
+~~~text
+#!/usr/bin/env python3
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+import dbus
+import dbus.exceptions
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+
+BLUEZ = "org.bluez"
+OBJECT_MANAGER = "org.freedesktop.DBus.ObjectManager"
+PROPERTIES = "org.freedesktop.DBus.Properties"
+ADAPTER = "org.bluez.Adapter1"
+GATT_MANAGER = "org.bluez.GattManager1"
+ADVERTISING_MANAGER = "org.bluez.LEAdvertisingManager1"
+GATT_SERVICE = "org.bluez.GattService1"
+GATT_CHARACTERISTIC = "org.bluez.GattCharacteristic1"
+ADVERTISEMENT = "org.bluez.LEAdvertisement1"
+
+APP_PATH = "/org/lumelo/provisioning"
+ADV_PATH = "/org/lumelo/provisioning/advertisement0"
+SERVICE_UUID = "7b6a0001-8d8b-4e31-9f0a-9a9f4d1f2c10"
+DEVICE_INFO_UUID = "7b6a0002-8d8b-4e31-9f0a-9a9f4d1f2c10"
+WIFI_CREDENTIALS_UUID = "7b6a0003-8d8b-4e31-9f0a-9a9f4d1f2c10"
+APPLY_UUID = "7b6a0004-8d8b-4e31-9f0a-9a9f4d1f2c10"
+STATUS_UUID = "7b6a0005-8d8b-4e31-9f0a-9a9f4d1f2c10"
+DEFAULT_ADAPTER_WAIT_SECONDS = 20
+DEFAULT_IP_WAIT_SECONDS = 45
+PROVISIONING_ALIAS = "Lumelo T4"
+
+
+class InvalidArgsException(dbus.exceptions.DBusException):
+    _dbus_error_name = "org.freedesktop.DBus.Error.InvalidArgs"
+
+
+class NotSupportedException(dbus.exceptions.DBusException):
+    _dbus_error_name = "org.bluez.Error.NotSupported"
+
+
+def bytes_for_text(value):
+    return [dbus.Byte(byte) for byte in value.encode("utf-8")]
+
+
+def text_from_bytes(value):
+    return bytes(bytearray(value)).decode("utf-8")
+
+
+def current_ip():
+    try:
+        result = subprocess.run(
+            ["hostname", "-I"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return ""
+
+    for candidate in result.stdout.split():
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    return ""
+
+
+def current_ip_for_interface(interface):
+    if not interface:
+        return ""
+
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "dev", interface, "scope", "global"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return ""
+
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        for index, field in enumerate(fields):
+            if field == "inet" and index + 1 < len(fields):
+                return fields[index + 1].split("/", 1)[0]
+    return ""
+
+
+def adapter_wait_seconds():
+    raw = os.environ.get("LUMELO_BLE_ADAPTER_WAIT_SECONDS", str(DEFAULT_ADAPTER_WAIT_SECONDS))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_ADAPTER_WAIT_SECONDS
+
+
+def ip_wait_seconds():
+    raw = os.environ.get("LUMELO_WIFI_IP_WAIT_SECONDS", str(DEFAULT_IP_WAIT_SECONDS))
+    try:
+        return max(5, int(raw))
+    except ValueError:
+        return DEFAULT_IP_WAIT_SECONDS
+
+
+def runtime_dir():
+    return (
+        os.environ.get("LUMELO_RUNTIME_DIR")
+        or os.environ.get("PRODUCT_RUNTIME_DIR")
+        or "/run/lumelo"
+    )
+
+
+def provisioning_status_path():
+    return os.path.join(runtime_dir(), "provisioning-status.json")
+
+
+def detect_wireless_interface():
+    override = os.environ.get("LUMELO_WIFI_IFACE") or os.environ.get("WIFI_INTERFACE")
+    if override:
+        return override
+
+    try:
+        result = subprocess.run(
+            ["iw", "dev"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        for line in result.stdout.splitlines():
+            fields = line.strip().split()
+            if len(fields) == 2 and fields[0] == "Interface":
+                return fields[1]
+    except Exception:
+        pass
+
+    net_root = "/sys/class/net"
+    try:
+        for name in sorted(os.listdir(net_root)):
+            if os.path.isdir(os.path.join(net_root, name, "wireless")):
+                return name
+    except FileNotFoundError:
+        return ""
+
+    return ""
+
+
+def iso_timestamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def normalize_summary(text, limit=240):
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def wpa_unit_name(interface):
+    if not interface:
+        return ""
+    return f"wpa_supplicant@{interface}.service"
+
+
+def diagnostic_hint(interface):
+    if interface:
+        return (
+            f"Check {wpa_unit_name(interface)}, "
+            f"networkctl status {interface}, "
+            "and /run/lumelo/provisioning-status.json"
+        )
+    return (
+        "Check iw dev, journalctl -u lumelo-wifi-provisiond.service -b -n 100, "
+        "and /run/lumelo/provisioning-status.json"
+    )
+
+
+def build_status_payload(
+    state,
+    message,
+    ip="",
+    ssid="",
+    wifi_interface="",
+    error="",
+    error_code="",
+    apply_output="",
+    diagnostic="",
+):
+    return {
+        "state": state,
+        "message": message,
+        "ssid": ssid,
+        "ip": ip,
+        "web_url": f"http://{ip}:18080/" if ip else "",
+        "hostname": socket.gethostname(),
+        "wifi_interface": wifi_interface,
+        "wpa_unit": wpa_unit_name(wifi_interface),
+        "status_path": provisioning_status_path(),
+        "updated_at": iso_timestamp(),
+        "error": error,
+        "error_code": error_code,
+        "apply_output": apply_output,
+        "ip_wait_seconds": ip_wait_seconds(),
+        "diagnostic_hint": diagnostic or diagnostic_hint(wifi_interface),
+    }
+
+
+def write_status_file(payload):
+    path = provisioning_status_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"))
+        handle.write("\n")
+    os.replace(tmp_path, path)
+
+
+def write_bootstrap_status(
+    state,
+    message,
+    wifi_interface="",
+    ip="",
+    ssid="",
+    error="",
+    error_code="",
+    apply_output="",
+):
+    try:
+        write_status_file(
+            build_status_payload(
+                state,
+                message,
+                ip=ip,
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error=error,
+                error_code=error_code,
+                apply_output=apply_output,
+            )
+        )
+    except Exception as exc:
+        print(f"Failed to write provisioning status file: {exc}", file=sys.stderr)
+
+
+class Application(dbus.service.Object):
+    def __init__(self, bus, bus_name):
+        self.path = APP_PATH
+        self.credentials = {}
+        self.wifi_interface = detect_wireless_interface()
+        self.bus = bus
+        self.bus_name = bus_name
+        dbus.service.Object.__init__(self, bus_name, self.path)
+        self.status = StatusCharacteristic(bus, 3, self)
+        self.service = ProvisioningService(bus, 0, self)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def refresh_wifi_interface(self):
+        self.wifi_interface = detect_wireless_interface()
+        return self.wifi_interface
+
+    @dbus.service.method(OBJECT_MANAGER, out_signature="a{oa{sa{sv}}}")
+    def GetManagedObjects(self):
+        response = {}
+        response[self.service.get_path()] = self.service.get_properties()
+        for characteristic in self.service.characteristics:
+            response[characteristic.get_path()] = characteristic.get_properties()
+        return response
+
+
+class ProvisioningService(dbus.service.Object):
+    def __init__(self, bus, index, app):
+        self.path = f"{APP_PATH}/service{index}"
+        self.uuid = SERVICE_UUID
+        self.primary = True
+        self.app = app
+        self.characteristics = [
+            DeviceInfoCharacteristic(bus, 0, app),
+            WifiCredentialsCharacteristic(bus, 1, app),
+            ApplyCharacteristic(bus, 2, app),
+            app.status,
+        ]
+        dbus.service.Object.__init__(self, app.bus_name, self.path)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def get_properties(self):
+        return {
+            GATT_SERVICE: {
+                "UUID": self.uuid,
+                "Primary": self.primary,
+                "Characteristics": dbus.Array(
+                    [characteristic.get_path() for characteristic in self.characteristics],
+                    signature="o",
+                ),
+            }
+        }
+
+    @dbus.service.method(PROPERTIES, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != GATT_SERVICE:
+            raise InvalidArgsException()
+        return self.get_properties()[GATT_SERVICE]
+
+
+class Characteristic(dbus.service.Object):
+    def __init__(self, bus, index, uuid, flags, app):
+        self.path = f"{app.service.path if hasattr(app, 'service') else APP_PATH + '/service0'}/char{index}"
+        self.uuid = uuid
+        self.flags = flags
+        self.app = app
+        dbus.service.Object.__init__(self, app.bus_name, self.path)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def get_properties(self):
+        return {
+            GATT_CHARACTERISTIC: {
+                "Service": dbus.ObjectPath(f"{APP_PATH}/service0"),
+                "UUID": self.uuid,
+                "Flags": dbus.Array(self.flags, signature="s"),
+            }
+        }
+
+    @dbus.service.method(PROPERTIES, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != GATT_CHARACTERISTIC:
+            raise InvalidArgsException()
+        return self.get_properties()[GATT_CHARACTERISTIC]
+
+    @dbus.service.method(GATT_CHARACTERISTIC, in_signature="a{sv}", out_signature="ay")
+    def ReadValue(self, options):
+        raise NotSupportedException()
+
+    @dbus.service.method(GATT_CHARACTERISTIC, in_signature="aya{sv}")
+    def WriteValue(self, value, options):
+        raise NotSupportedException()
+
+
+class DeviceInfoCharacteristic(Characteristic):
+    def __init__(self, bus, index, app):
+        Characteristic.__init__(self, bus, index, DEVICE_INFO_UUID, ["read"], app)
+
+    @dbus.service.method(GATT_CHARACTERISTIC, in_signature="a{sv}", out_signature="ay")
+    def ReadValue(self, options):
+        wifi_interface = self.app.refresh_wifi_interface()
+        ip = current_ip_for_interface(wifi_interface) or current_ip()
+        payload = {
+            "name": "Lumelo T4",
+            "hostname": socket.gethostname(),
+            "ip": ip,
+            "wifi_interface": wifi_interface,
+            "status_path": provisioning_status_path(),
+            "web_port": 18080,
+        }
+        return bytes_for_text(json.dumps(payload, separators=(",", ":")))
+
+
+class WifiCredentialsCharacteristic(Characteristic):
+    def __init__(self, bus, index, app):
+        Characteristic.__init__(self, bus, index, WIFI_CREDENTIALS_UUID, ["write"], app)
+
+    @dbus.service.method(GATT_CHARACTERISTIC, in_signature="aya{sv}")
+    def WriteValue(self, value, options):
+        try:
+            payload = json.loads(text_from_bytes(value))
+        except json.JSONDecodeError as exc:
+            raise InvalidArgsException(f"invalid JSON payload: {exc.msg}")
+        ssid = payload.get("ssid", "")
+        password = payload.get("password", "")
+        if not ssid or not password:
+            raise InvalidArgsException("ssid and password are required")
+        wifi_interface = self.app.refresh_wifi_interface()
+        self.app.credentials = {
+            "ssid": ssid,
+            "password": password,
+            "wifi_interface": wifi_interface,
+        }
+        self.app.status.cancel_pending_wait()
+        self.app.status.set_state(
+            "credentials_ready",
+            "credentials received",
+            ssid=ssid,
+            wifi_interface=wifi_interface,
+            diagnostic=diagnostic_hint(wifi_interface),
+        )
+
+
+class ApplyCharacteristic(Characteristic):
+    def __init__(self, bus, index, app):
+        Characteristic.__init__(self, bus, index, APPLY_UUID, ["write"], app)
+
+    @dbus.service.method(GATT_CHARACTERISTIC, in_signature="aya{sv}")
+    def WriteValue(self, value, options):
+        credentials = self.app.credentials
+        ssid = credentials.get("ssid", "")
+        password = credentials.get("password", "")
+        wifi_interface = credentials.get("wifi_interface") or self.app.refresh_wifi_interface()
+        if not ssid or not password:
+            self.app.status.set_state("failed", "missing credentials", wifi_interface=wifi_interface)
+            raise InvalidArgsException("missing credentials")
+
+        self.app.status.cancel_pending_wait()
+        self.app.status.set_state(
+            "applying",
+            f"applying credentials for {ssid}",
+            ssid=ssid,
+            wifi_interface=wifi_interface,
+            diagnostic=diagnostic_hint(wifi_interface),
+        )
+        try:
+            result = subprocess.run(
+                ["/usr/bin/lumelo-wifi-apply", ssid, password],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+        except Exception as exc:
+            apply_output = normalize_summary(str(exc))
+            self.app.status.set_state(
+                "failed",
+                str(exc),
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error="wifi_apply_exception",
+                error_code="wifi_apply_exception",
+                apply_output=apply_output,
+                diagnostic=diagnostic_hint(wifi_interface),
+            )
+            return
+
+        apply_output = normalize_summary(result.stdout or result.stderr or "")
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "wifi apply failed").strip()
+            self.app.status.set_state(
+                "failed",
+                message,
+                ssid=ssid,
+                wifi_interface=wifi_interface,
+                error=f"wifi_apply_exit_{result.returncode}",
+                error_code=f"wifi_apply_exit_{result.returncode}",
+                apply_output=apply_output,
+                diagnostic=diagnostic_hint(wifi_interface),
+            )
+            return
+
+        self.app.status.begin_wait_for_ip(
+            ssid,
+            wifi_interface,
+            apply_output,
+        )
+
+
+class StatusCharacteristic(Characteristic):
+    def __init__(self, bus, index, app):
+        self.state = build_status_payload("idle", "waiting for credentials")
+        self.notifying = False
+        self.pending_wait_token = 0
+        Characteristic.__init__(self, bus, index, STATUS_UUID, ["read", "notify"], app)
+        write_status_file(self.state)
+
+    @dbus.service.method(GATT_CHARACTERISTIC, in_signature="a{sv}", out_signature="ay")
+    def ReadValue(self, options):
+        return bytes_for_text(json.dumps(self.state, separators=(",", ":")))
+
+    @dbus.service.method(GATT_CHARACTERISTIC)
+    def StartNotify(self):
+        self.notifying = True
+        self.emit_value()
+
+    @dbus.service.method(GATT_CHARACTERISTIC)
+    def StopNotify(self):
+        self.notifying = False
+
+    @dbus.service.signal(PROPERTIES, signature="sa{sv}as")
+    def PropertiesChanged(self, interface, changed, invalidated):
+        pass
+
+    def cancel_pending_wait(self):
+        self.pending_wait_token += 1
+
+    def begin_wait_for_ip(self, ssid, wifi_interface, apply_output=""):
+        self.cancel_pending_wait()
+        token = self.pending_wait_token
+        deadline = time.monotonic() + ip_wait_seconds()
+        interface = wifi_interface or self.app.refresh_wifi_interface()
+        waiting_message = (
+            f"credentials applied for {ssid}; waiting for DHCP on {interface}"
+            if interface
+            else f"credentials applied for {ssid}; waiting for DHCP"
+        )
+        self.set_state(
+            "waiting_for_ip",
+            waiting_message,
+            ssid=ssid,
+            wifi_interface=interface,
+            apply_output=apply_output,
+            diagnostic=diagnostic_hint(interface),
+        )
+
+        def poll():
+            if token != self.pending_wait_token:
+                return False
+
+            current_interface = interface or self.app.refresh_wifi_interface()
+            ip = current_ip_for_interface(current_interface)
+            if ip:
+                self.set_state(
+                    "connected",
+                    f"wifi connected on {current_interface}" if current_interface else "wifi connected",
+                    ip=ip,
+                    ssid=ssid,
+                    wifi_interface=current_interface,
+                    apply_output=apply_output,
+                    diagnostic="Open /provisioning, /healthz, and /logs from the phone browser",
+                )
+                return False
+
+            if time.monotonic() >= deadline:
+                target = current_interface if current_interface else "wireless interface"
+                self.set_state(
+                    "failed",
+                    f"timed out waiting for DHCP on {target}",
+                    ssid=ssid,
+                    wifi_interface=current_interface,
+                    error="dhcp_timeout",
+                    error_code="dhcp_timeout",
+                    apply_output=apply_output,
+                    diagnostic=diagnostic_hint(current_interface),
+                )
+                return False
+
+            return True
+
+        if not poll():
+            return
+        GLib.timeout_add_seconds(1, poll)
+
+    def set_state(
+        self,
+        state,
+        message,
+        ip="",
+        ssid="",
+        wifi_interface="",
+        error="",
+        error_code="",
+        apply_output="",
+        diagnostic="",
+    ):
+        if not ssid:
+            ssid = self.state.get("ssid", "")
+        if not wifi_interface:
+            wifi_interface = self.app.refresh_wifi_interface() or self.state.get("wifi_interface", "")
+        if not apply_output:
+            apply_output = self.state.get("apply_output", "")
+        if not diagnostic:
+            diagnostic = diagnostic_hint(wifi_interface)
+        self.state = build_status_payload(
+            state,
+            message,
+            ip=ip,
+            ssid=ssid,
+            wifi_interface=wifi_interface,
+            error=error,
+            error_code=error_code,
+            apply_output=apply_output,
+            diagnostic=diagnostic,
+        )
+        write_status_file(self.state)
+        self.emit_value()
+
+    def emit_value(self):
+        if not self.notifying:
+            return
+        self.PropertiesChanged(
+            GATT_CHARACTERISTIC,
+            {"Value": dbus.Array(bytes_for_text(json.dumps(self.state, separators=(",", ":"))), signature="y")},
+            [],
+        )
+
+
+class Advertisement(dbus.service.Object):
+    def __init__(self, bus_name):
+        self.path = ADV_PATH
+        dbus.service.Object.__init__(self, bus_name, self.path)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def get_properties(self):
+        return {
+            ADVERTISEMENT: {
+                "Type": "peripheral",
+                "ServiceUUIDs": dbus.Array([SERVICE_UUID], signature="s"),
+                "LocalName": PROVISIONING_ALIAS,
+                "Discoverable": dbus.Boolean(True),
+                "DiscoverableTimeout": dbus.UInt16(0),
+                "Includes": dbus.Array(["tx-power"], signature="s"),
+            }
+        }
+
+    @dbus.service.method(PROPERTIES, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != ADVERTISEMENT:
+            raise InvalidArgsException()
+        return self.get_properties()[ADVERTISEMENT]
+
+    @dbus.service.method(ADVERTISEMENT)
+    def Release(self):
+        print("Advertisement released")
+
+
+def find_adapter(bus):
+    manager = dbus.Interface(bus.get_object(BLUEZ, "/"), OBJECT_MANAGER)
+    objects = manager.GetManagedObjects()
+    for path, interfaces in objects.items():
+        if GATT_MANAGER in interfaces and ADVERTISING_MANAGER in interfaces:
+            return path
+    return None
+
+
+def wait_for_adapter(bus):
+    deadline = time.monotonic() + adapter_wait_seconds()
+    while True:
+        adapter = find_adapter(bus)
+        if adapter:
+            return adapter
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(1)
+
+
+def adapter_properties(bus, adapter):
+    return dbus.Interface(bus.get_object(BLUEZ, adapter), PROPERTIES)
+
+
+def get_adapter_property(properties, name):
+    try:
+        return properties.Get(ADAPTER, name)
+    except dbus.exceptions.DBusException:
+        return None
+
+
+def set_adapter_property(properties, name, value):
+    try:
+        properties.Set(ADAPTER, name, value)
+        return True
+    except dbus.exceptions.DBusException as exc:
+        print(f"Failed to set adapter {name}: {exc}", file=sys.stderr)
+        return False
+
+
+def configure_adapter(bus, adapter):
+    properties = adapter_properties(bus, adapter)
+
+    desired = [
+        ("Powered", dbus.Boolean(True)),
+        ("Alias", dbus.String(PROVISIONING_ALIAS)),
+        ("Connectable", dbus.Boolean(True)),
+        ("PairableTimeout", dbus.UInt32(0)),
+        ("DiscoverableTimeout", dbus.UInt32(0)),
+        ("Pairable", dbus.Boolean(True)),
+        ("Discoverable", dbus.Boolean(True)),
+    ]
+    for name, value in desired:
+        set_adapter_property(properties, name, value)
+
+    snapshot = {}
+    for name in ("Address", "Alias", "Powered", "Connectable", "Pairable", "Discoverable", "Roles"):
+        snapshot[name] = get_adapter_property(properties, name)
+    return snapshot
+
+
+def summarize_adapter(snapshot):
+    roles = ",".join(str(role) for role in snapshot.get("Roles") or [])
+    return (
+        f"address={snapshot.get('Address', '?')} "
+        f"alias={snapshot.get('Alias', '?')} "
+        f"powered={bool(snapshot.get('Powered'))} "
+        f"connectable={bool(snapshot.get('Connectable'))} "
+        f"pairable={bool(snapshot.get('Pairable'))} "
+        f"discoverable={bool(snapshot.get('Discoverable'))} "
+        f"roles={roles or '-'}"
+    )
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    bus_name = dbus.service.BusName("org.lumelo.provisioning", bus)
+    adapter = wait_for_adapter(bus)
+    if not adapter:
+        message = "No BLE-capable BlueZ adapter found before timeout"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=detect_wireless_interface(),
+            error="missing_ble_adapter",
+            error_code="missing_ble_adapter",
+        )
+        print(message, file=sys.stderr)
+        return 1
+
+    adapter_snapshot = configure_adapter(bus, adapter)
+
+    app = Application(bus, bus_name)
+    advertisement = Advertisement(bus_name)
+
+    service_manager = dbus.Interface(bus.get_object(BLUEZ, adapter), GATT_MANAGER)
+    advertising_manager = dbus.Interface(bus.get_object(BLUEZ, adapter), ADVERTISING_MANAGER)
+
+    loop = GLib.MainLoop()
+    registration_state = {"app": False, "adv": False, "failed": False}
+
+    def fail_registration(exc):
+        if registration_state["failed"]:
+            return
+        registration_state["failed"] = True
+        message = f"Failed to register Lumelo BLE Wi-Fi provisioning service: {exc}"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=app.refresh_wifi_interface(),
+            error="register_failed",
+            error_code="register_failed",
+        )
+        print(message, file=sys.stderr)
+        loop.quit()
+
+    def maybe_ready():
+        if registration_state["failed"]:
+            return
+        if registration_state["app"] and registration_state["adv"]:
+            app.status.set_state(
+                "advertising",
+                "ready for bluetooth provisioning",
+                wifi_interface=app.refresh_wifi_interface(),
+                diagnostic="Use the Android app to scan for Lumelo T4 and connect over BLE",
+            )
+            print(
+                "Lumelo BLE Wi-Fi provisioning service registered on "
+                f"{adapter} ({summarize_adapter(adapter_snapshot)})"
+            )
+            return
+
+    def on_app_registered():
+        registration_state["app"] = True
+        maybe_ready()
+
+    def on_adv_registered():
+        registration_state["adv"] = True
+        maybe_ready()
+
+    service_manager.RegisterApplication(
+        app.get_path(),
+        {},
+        reply_handler=on_app_registered,
+        error_handler=fail_registration,
+    )
+    advertising_manager.RegisterAdvertisement(
+        advertisement.get_path(),
+        {},
+        reply_handler=on_adv_registered,
+        error_handler=fail_registration,
+    )
+    loop.run()
+    return 1 if registration_state["failed"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+~~~
+

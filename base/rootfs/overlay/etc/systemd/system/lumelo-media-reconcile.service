@@ -1,0 +1,8 @@
+[Unit]
+Description=Lumelo Removable Media Availability Reconcile
+After=local-fs.target
+ConditionPathExists=/usr/bin/lumelo-media-import
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/lumelo-media-import reconcile-volumes

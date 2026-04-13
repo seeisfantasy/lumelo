@@ -104,6 +104,18 @@
             <dd>{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
           </div>
           <div>
+            <dt>Wi-Fi IP</dt>
+            <dd>{{if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Wired IP</dt>
+            <dd>{{if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>All IPs</dt>
+            <dd>{{if .Provisioning.AllIPs}}{{range $index, $ip := .Provisioning.AllIPs}}{{if $index}}, {{end}}{{$ip}}{{end}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
             <dt>Wi-Fi interface</dt>
             <dd>{{if .Provisioning.WiFiInterface}}{{.Provisioning.WiFiInterface}}{{else}}-{{end}}</dd>
           </div>
@@ -273,7 +285,7 @@
           return;
         }
 
-        const stream = new EventSource({{printf "%q" .PlaybackStreamPath}});
+        const stream = new EventSource('{{.PlaybackStreamPath}}');
         let reloadPending = false;
 
         const scheduleReload = (label) => {

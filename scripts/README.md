@@ -21,3 +21,4 @@ Current development helpers:
 - `verify-t4-lumelo-rootfs-image.sh`
 - `compare-t4-wireless-golden.sh`
 - `deploy-t4-runtime-update.sh`
+- `build-ai-review-docs.py`

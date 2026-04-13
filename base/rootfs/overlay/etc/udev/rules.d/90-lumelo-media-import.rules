@@ -1,0 +1,4 @@
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_USAGE}=="filesystem", ATTRS{removable}=="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="lumelo-media-import@%k.service"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_BUS}=="usb", TAG+="systemd", ENV{SYSTEMD_WANTS}+="lumelo-media-import@%k.service"
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ATTRS{removable}=="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="lumelo-media-reconcile.service"
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", TAG+="systemd", ENV{SYSTEMD_WANTS}+="lumelo-media-reconcile.service"

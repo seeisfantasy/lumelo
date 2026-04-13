@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/url"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // Client is the control-plane view of the library/index layer.
@@ -68,7 +68,7 @@ func New(libraryDBPath string) *Client {
 func (c *Client) Snapshot(ctx context.Context) Snapshot {
 	snapshot := Snapshot{DBPath: c.LibraryDBPath}
 
-	db, err := sql.Open("sqlite3", sqliteReadOnlyDSN(c.LibraryDBPath))
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(c.LibraryDBPath))
 	if err != nil {
 		snapshot.Error = fmt.Sprintf("open library db: %v", err)
 		return snapshot
@@ -114,7 +114,6 @@ func sqliteReadOnlyDSN(path string) string {
 	u := &url.URL{Scheme: "file", Path: path}
 	query := url.Values{}
 	query.Set("mode", "ro")
-	query.Set("_busy_timeout", "2000")
 	u.RawQuery = query.Encode()
 	return u.String()
 }

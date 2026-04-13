@@ -278,6 +278,22 @@ dd {
   background: rgba(255, 253, 249, 0.88);
 }
 
+.library-cover-link {
+  display: inline-flex;
+  margin-bottom: 0.8rem;
+  border-radius: 0.9rem;
+  overflow: hidden;
+  border: 1px solid rgba(31, 29, 26, 0.12);
+  background: rgba(31, 29, 26, 0.04);
+}
+
+.library-cover-art {
+  display: block;
+  width: 5.5rem;
+  height: 5.5rem;
+  object-fit: cover;
+}
+
 .library-title {
   font-weight: 700;
   line-height: 1.5;

@@ -302,6 +302,121 @@ SHA256：
 - Android 端扫描兼容性已补两层兜底：
   - remembered device 回填
   - 首次扫描保留 `[CLASSIC]` 候选并优先显示明确 `nameMatch`
+- `v16` 的板子侧回归已补齐一轮现场真机验证：
+  - 冷启动后确认仍是 `sd` 引导：
+    - `/proc/cmdline` 含 `storagemedia=sd`
+    - `who -b` / `uptime` 可见新启动已发生
+  - 开机后无需手工拉服务：
+    - `bluetooth.service`
+    - `lumelo-wifi-provisiond.service`
+    - `wpa_supplicant@wlan0.service`
+    都会自动进入 `active`
+  - 冷启动后手机无需手工拉服务就能重新：
+    - 扫到 `Lumelo T4`
+    - `CONNECT`
+    - 收到 `hello / device_info`
+  - 重启后自动回连 `isee_test` 已验证通过
+  - 双网卡 / 双 IP 的状态页与 JSON 已完成现场验证：
+    - 热点场景：
+      - `wired_ip = 192.168.1.120`
+      - `wifi_ip = 192.168.43.170`
+    - 家庭路由器场景：
+      - `wired_ip = 192.168.1.120`
+      - `wifi_ip = 192.168.1.121`
+  - 家庭路由器 `iSee` 场景也已验证通过：
+    - 板子能在经典蓝牙配网后切到 `iSee`
+    - Mac / 手机 / T4 最终处于同一 `192.168.1.x` 网段
+    - `/provisioning-status` 与首页都能正确显示：
+      - `ssid`
+      - `wifi_ip`
+      - `wired_ip`
+      - `all_ips`
+- `controld` 已切到纯 Go SQLite 驱动：
+  - 板端 `/library` 不再因 `CGO_ENABLED=0` 落到 sqlite stub
+  - 当前家庭路由器场景下，Mac 访问 `http://192.168.1.121:18080/library` 已能看到真实条目
+- `/run/lumelo` 运行目录已恢复稳定：
+  - `lumelo-wifi-provisiond.service` 已补 `RuntimeDirectoryPreserve=yes`
+  - `playback_cmd.sock` / `playback_evt.sock` 已重新出现
+- 真实曲库索引与 `ALSA hw` 最小闭环已经做过现场 smoke：
+  - 板端生成真实 `WAV`
+  - `media-indexd scan-dir /var/lib/lumelo/test-media` 已写入 `library.db`
+  - `/library` 现可见：
+    - `1 volume`
+    - `1 album`
+    - `1 track`
+  - `aplay -D default` 已成功播放这首真实 `WAV`
+  - 新增板端 helper：
+    - `/usr/bin/lumelo-media-smoke`
+    - 已现场验证：
+      - `lumelo-media-smoke list --first-wav`
+      - `lumelo-media-smoke play --first-wav`
+      - `lumelo-media-smoke smoke --skip-play`
+- `playbackd` 已接入真机最小真实输出：
+  - 当前使用 `library.db` 按 `track_uid` 解析真实媒体路径
+  - 当前板端输出实现已经分成两条：
+    - `wav` 直通：
+      - `playbackd -> aplay -D default <file> -> ALSA hw`
+    - 第一版非 `wav` 解码：
+      - `playbackd -> symphonia decode -> aplay -t raw -f S16_LE -c <channels> -r <sample_rate> -> ALSA hw`
+  - 当前真机已验证通过的格式：
+    - `wav`
+    - `m4a/aac`
+    - `flac`
+    - `mp3`
+    - `ogg`
+  - 板端 helper 已补充自动回归命令：
+    - `lumelo-media-smoke regress-playback --timeout 8`
+    - `lumelo-media-smoke regress-playback --timeout 8 --decoded-format flac`
+    - 长时长压缩格式可用：
+      - `lumelo-media-smoke regress-playback --timeout 8 --decoded-format mp3 --skip-mixed`
+      - `lumelo-media-smoke regress-playback --timeout 8 --decoded-format ogg --skip-mixed`
+    - 如果板子上已经有多个 indexed volume：
+      - 可加：
+        - `--mount-root /var/lib/lumelo/test-media`
+      - 避免 helper 误选到批量回归生成的另一棵测试树
+  - 板端批量扫描 helper 已落地：
+    - `lumelo-media-smoke regress-library-scan`
+    - 当前会在：
+      - `/var/lib/lumelo/test-media-batch`
+      生成独立 fixture 根目录
+    - 当前已现场验证通过：
+      - `tracks = 5`
+      - `directories = 3`
+      - `formats = ["flac", "m4a", "mp3", "ogg", "wav"]`
+      - `albums = 3`
+      - `covered_tracks = 4`
+      - `artwork refs = 2`
+    - helper 现在还会同时验证：
+      - `Album Alpha/folder.jpg` 优先于 `cover.jpg`
+      - `Album Beta/cover.jpg` 能正常生成 `thumb/320`
+      - `Album Gamma` 保持无封面
+  - `controld /library` 已不再只是显示 `thumb_rel_path` 文本
+    - 现在新增：
+      - `/artwork/...` 只读路由
+      - 专辑列表真实 `<img>` 缩略图渲染
+    - 现场已验证：
+      - `curl -I http://192.168.1.121:18080/artwork/thumb/320/...jpg`
+      - 返回：
+        - `200 OK`
+        - `Content-Type: image/jpeg`
+- 真机已验证通过的 `playbackd` 控制链：
+  - `Play`
+  - `Pause`
+  - `Play same track` 作为 `Resume`
+  - `Stop`
+  - `Queue Append + Next`
+  - `Prev`
+  - `Play History`
+  - `m4a -> wav` 混合队列下的自动切歌
+  - 长时长 `mp3 -> wav` 混合队列下的自动切歌
+  - 长时长 `ogg -> wav` 混合队列下的自动切歌
+  - 单轨自然播完后自动回到 `stopped`
+- 首页默认 `track id` 已改成：
+  - 若当前已有播放曲目，用当前曲目
+  - 否则自动填充曲库中第一首已索引轨道
+- `/` 页的播放事件 SSE 路径已修正：
+  - 浏览器端现在会订阅 `/events/playback`
+  - 不再是之前那种双重引号路径
 
 当前只需记住一个现场说明：
 
@@ -312,13 +427,13 @@ SHA256：
 
 ### 9.2 板子侧仍未闭环
 
-- `v16` 还没有做“无人工干预冷启动”真机回归
-- 需要确认：
-  - 经典蓝牙是否开机自动起来
-  - 手机是否无需手工拉服务就能扫描并连接
-- 需要补家庭路由器场景，不只测手机热点
-- 需要补重启后 Wi‑Fi 自动回连
-- 需要补双网卡 / 双 IP 场景的页面与状态展示验证
+- 本轮原先列出的板子侧验证项已经补齐
+- 当前只剩一个硬件启动边界仍需单独记住：
+  - 这块板子若不按键，默认会进 `eMMC`
+  - 因此“无人工干预冷启动进入调试 `sd` 系统”本身还不成立
+  - 当前已验证的是：
+    - 在人工按键选择 `sd` 启动后
+    - `v16` 系统内的蓝牙、Wi‑Fi、自恢复与状态展示都能自动起来
 
 ### 9.3 手机 APK 仍未闭环
 
@@ -339,12 +454,61 @@ SHA256：
 ### 9.5 业务功能仍未闭环
 
 - 主界面 `/`、曲库 `/library`、配网页 `/provisioning` 都已能打开
-- 但真实曲库和真实播放回归还没开始
-- 当前仍未做：
-  - 曲库索引真机回归
-  - 真实播放
-  - 播放 / 暂停 / 切歌
-  - `ALSA hw` 真机音频链
+- 真实曲库索引、`ALSA hw` 最小 smoke、以及 `playbackd` 的 `wav + m4a/aac + flac + mp3 + ogg` 真机输出都已起步并通过
+- tagged 元数据真机回归也已完成：
+  - 新增一套真实标签 fixture：
+    - `Northern Signals`
+    - `Transit Lines`
+  - 已现场确认：
+    - 专辑艺人
+    - 曲目艺人
+    - 年份
+    - 流派
+    - `disc_no`
+    - `track_no`
+    - 目录封面缩略图
+    - 从 tagged 曲库直接点播 `mp3` 轨道
+- 外部媒体主链也已再往前推进一段：
+  - [lumelo-media-import](/Volumes/SeeDisk/Codex/Lumelo/base/rootfs/overlay/usr/bin/lumelo-media-import)
+    已支持：
+    - `list-mounted`
+    - `scan-path`
+    - `scan-mounted`
+    - `import-device`
+    - `reconcile-volumes`
+  - 当前已现场验证：
+    - 无介质时 `list-mounted = []`
+    - 播放期扫描会拒绝
+    - loop ISO 模拟块设备可以完成：
+      - 挂载
+      - 入库
+      - 点播
+      - 卸载后 reconcile
+- 稳定性回归也已补上两条正式板端命令：
+  - `lumelo-media-smoke regress-playbackd-restart`
+  - `lumelo-media-smoke regress-bad-media`
+  - 当前已现场确认：
+    - `playbackd` 重启后：
+      - `queue_entries` 保持
+      - `current_track` 保持
+      - 状态会回到 `stopped`
+    - 坏文件当前仍会被索引进曲库
+    - 但播放坏文件时：
+      - 会进入 `quiet_error_hold`
+      - `playbackd.service` 不会被拖挂
+      - 随后仍能立刻恢复正常播放有效轨道
+- 当前真正仍未闭环的只剩：
+  - 真外部 TF / USB 介质在场下的热插入 / 热拔出闭环
+  - 整机重启后的状态回归
+  - 是否要在索引层直接过滤坏文件，避免它们出现在用户曲库里
+
+另外一个新的现状判断：
+
+- 当前板子现场依旧没有真外部 TF / USB 介质插着
+- 所以“真硬件插入 -> udev 触发 -> 自动挂载 -> 自动导入 -> 拔出下线”这整条链还没有完成最终真机闭环
+- 但在没有真介质的前提下，已经不只是探路：
+  - 最小入口命令已落地
+  - 模拟块设备导入也已通过
 
 ## 10. 测试环境这轮新增的重要事项
 
@@ -364,49 +528,39 @@ SHA256：
 export PATH="/Users/see/Library/Android/sdk/platform-tools:$PATH"
 ```
 
-## 11. 新窗口第一步该做什么
+## 11. 新窗口当前接手顺序
 
 按这个顺序接手最稳：
 
-1. 先读：
-   - 产品手册
-   - 开发日志
-   - 环境 README
-   - APK 进度文档
-   - `v15` 真机问题清单
-2. 直接使用最新产物：
-   - `lumelo-t4-rootfs-20260412-v16.img`
-   - `lumelo-android-provisioning-20260412-webviewpollfix-debug.apk`
-3. 先上板 `v16`
-4. 第一轮真机优先只做：
-   - 无人工干预冷启动
-   - `Lumelo Scan`
-   - `CONNECT`
-   - `device_info`
-   - `SEND WI-FI CREDENTIALS`
-   - `OPEN WEBUI`
-5. 若 `v16` 冷启动就能直接扫到并连上：
-   - 继续测家庭路由器场景
-   - 继续测重启后自动回连
-6. 只有在上面都稳后，再切入：
-   - 曲库
-   - 播放
-   - 音频真机链
+1. 先看：
+   - [docs/README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/README.md)
+   - [AI_Handoff_Memory.md](/Volumes/SeeDisk/Codex/Lumelo/docs/AI_Handoff_Memory.md)
+   - [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
+   - [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
+2. 若要给外部 AI 做静态审查：
+   - 直接看 `docs/review/`
+3. 若板子当前不在线：
+   - 先确认是否掉回默认 `eMMC`
+   - 当前调试系统仍需要人工按键选择 `sd`
+4. 回到 `sd` 系统后，当前优先只补：
+   - 真 TF / USB 介质在场下的热插入 / 热拔出闭环
+   - 整机重启后的状态回归
+   - 坏文件是否要在索引层直接过滤
+5. 上面三项补齐后：
+   - 这个阶段的底座和主链基本就可以视为完成
+   - 后续主重心再转向 UI、美化与易用性
 
-## 12. 这次最重要的结论，给新窗口一句话版
+## 12. 当前里程碑一句话版
 
-当前项目已经从“怀疑 BLE / 固件 / 手机兼容性”阶段，推进到了：
+当前项目已经不在“蓝牙 bring-up / Wi‑Fi 配网是否能跑通”的阶段，而是进入了：
 
-- 官方无线底座已纠正
-- 经典蓝牙配网主链已真机跑通
-- APK 的 WebView 切网恢复已修
-- 新的 `v16` 已出好并离线验包通过
+- 经典蓝牙加密配网已真机跑通
+- 真曲库索引、封面缩略图、WebUI 页面和 `playbackd` 真机输出已打通
+- `wav + m4a/aac + flac + mp3 + ogg` 都已在板子上验证通过
+- 外部媒体最小入口、模拟块设备导入、扫描/播放互斥、`playbackd` 重启恢复、坏文件恢复都已有正式回归入口
 
-现在最关键的下一步，不是再分析方向，而是：
+现在离“底座完整、主流程能跑、后面主要做 UI/易用性”的里程碑，真正剩下的重点只剩：
 
-- 把 `v16` 上板
-- 验证它是否终于能在无人工干预下，直接完成：
-  - 冷启动蓝牙
-  - 经典蓝牙连接
-  - Wi‑Fi 下发
-  - WebUI 打开
+- 真 TF / USB 热插入 / 热拔出闭环
+- 整机重启后的状态回归
+- 坏文件索引策略是否要继续收严

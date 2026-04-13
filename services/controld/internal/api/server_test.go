@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -168,6 +169,9 @@ func TestProvisioningStatusReturnsLatestSnapshot(t *testing.T) {
 			Message:       "wifi connected",
 			SSID:          "Home WiFi",
 			IP:            "192.168.1.44",
+			WiFiIP:        "192.168.43.170",
+			WiredIP:       "192.168.1.120",
+			AllIPs:        []string{"192.168.1.120", "192.168.43.170"},
 			WebURL:        "http://192.168.1.44:18080/",
 			WiFiInterface: "wlan0",
 			WPAUnit:       "wpa_supplicant@wlan0.service",
@@ -193,15 +197,22 @@ func TestProvisioningStatusReturnsLatestSnapshot(t *testing.T) {
 	if !payload.Available || payload.State != "connected" || payload.IP != "192.168.1.44" {
 		t.Fatalf("unexpected provisioning payload: %+v", payload)
 	}
+	if payload.WiFiIP != "192.168.43.170" || payload.WiredIP != "192.168.1.120" || len(payload.AllIPs) != 2 {
+		t.Fatalf("expected dual-ip payload: %+v", payload)
+	}
 }
 
 func TestProvisioningPageRendersSnapshotDetails(t *testing.T) {
 	server := newTestServer(t, &fakeLogSource{text: "boot ok\n"}, &fakeProvisioningSource{
 		snapshot: provisioningclient.Snapshot{
 			Available: true,
-			State:     "waiting_for_ip",
-			Message:   "credentials applied; waiting for DHCP",
+			State:     "connected",
+			Message:   "wifi connected on wlan0; classic bluetooth provisioning remains available",
 			SSID:      "Studio WiFi",
+			IP:        "192.168.43.170",
+			WiFiIP:    "192.168.43.170",
+			WiredIP:   "192.168.1.120",
+			AllIPs:    []string{"192.168.1.120", "192.168.43.170"},
 		},
 	})
 
@@ -214,8 +225,51 @@ func TestProvisioningPageRendersSnapshotDetails(t *testing.T) {
 		t.Fatalf("unexpected status: %d", response.Code)
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, "Provisioning status") || !strings.Contains(body, "Studio WiFi") {
+	if !strings.Contains(body, "Provisioning status") || !strings.Contains(body, "Studio WiFi") || !strings.Contains(body, "192.168.1.120") {
 		t.Fatalf("expected provisioning page content, body: %s", body)
+	}
+}
+
+func TestArtworkRouteServesCachedThumbnail(t *testing.T) {
+	tempDir := t.TempDir()
+	artworkDir := filepath.Join(tempDir, "artwork")
+	thumbPath := filepath.Join(artworkDir, "thumb", "320", "aa", "bb", "fixture.jpg")
+	if err := os.MkdirAll(filepath.Dir(thumbPath), 0o755); err != nil {
+		t.Fatalf("mkdir artwork dir: %v", err)
+	}
+	if err := os.WriteFile(thumbPath, []byte("jpeg-fixture"), 0o644); err != nil {
+		t.Fatalf("write artwork fixture: %v", err)
+	}
+
+	server, err := api.New(api.Dependencies{
+		Auth: auth.NewService(false),
+		Playback: playbackclient.New(
+			filepath.Join(tempDir, "missing-playback-cmd.sock"),
+			filepath.Join(tempDir, "missing-playback-evt.sock"),
+		),
+		Library:          libraryclient.New(filepath.Join(tempDir, "missing-library.db")),
+		Logs:             &fakeLogSource{text: "boot ok\n"},
+		Provisioning:     &fakeProvisioningSource{},
+		Settings:         settings.Default(),
+		SSH:              sshctl.NewController(false),
+		Templates:        web.Assets,
+		Static:           web.Assets,
+		ArtworkCacheRoot: artworkDir,
+	})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/artwork/thumb/320/aa/bb/fixture.jpg", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	if body := response.Body.String(); body != "jpeg-fixture" {
+		t.Fatalf("unexpected artwork body: %q", body)
 	}
 }
 

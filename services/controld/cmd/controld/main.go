@@ -33,18 +33,20 @@ func main() {
 		[]string{"CONTROLD_LIBRARY_DB_PATH", "LIBRARY_DB_PATH"},
 		filepath.Join(stateDir, "library.db"),
 	)
+	artworkCacheRoot := getenv("CONTROLD_ARTWORK_CACHE_DIR", "/var/cache/lumelo/artwork")
 	provisioningStatusPath := getenv("CONTROLD_PROVISIONING_STATUS_PATH", filepath.Join(runtimeDir, "provisioning-status.json"))
 
 	server, err := api.New(api.Dependencies{
-		Auth:         auth.NewService(false),
-		Playback:     playbackclient.New(commandSocket, eventSocket),
-		Library:      libraryclient.New(libraryDBPath),
-		Logs:         logclient.New(),
-		Provisioning: provisioningclient.New(provisioningStatusPath),
-		Settings:     cfg,
-		SSH:          sshctl.NewController(cfg.SSHEnabled),
-		Templates:    web.Assets,
-		Static:       web.Assets,
+		Auth:             auth.NewService(false),
+		Playback:         playbackclient.New(commandSocket, eventSocket),
+		Library:          libraryclient.New(libraryDBPath),
+		Logs:             logclient.New(),
+		Provisioning:     provisioningclient.New(provisioningStatusPath),
+		Settings:         cfg,
+		SSH:              sshctl.NewController(cfg.SSHEnabled),
+		Templates:        web.Assets,
+		Static:           web.Assets,
+		ArtworkCacheRoot: artworkCacheRoot,
 	})
 	if err != nil {
 		log.Fatalf("build controld server: %v", err)

@@ -130,10 +130,22 @@
           <div class="library-list">
             {{range .AlbumEntries}}
               <article class="library-item">
+                {{if .CoverThumbPath}}
+                  <a href="{{.CoverThumbPath}}" class="library-cover-link" target="_blank" rel="noreferrer">
+                    <img src="{{.CoverThumbPath}}" alt="{{.Title}} cover" class="library-cover-art">
+                  </a>
+                {{end}}
                 <p class="library-title">{{.Title}}</p>
                 <p class="library-meta">{{.AlbumArtist}} · {{.YearLabel}} · {{.TrackCount}} tracks · {{.DurationLabel}}</p>
                 <p class="library-meta">{{.RootDirHint}}</p>
-                <p class="library-meta">thumb {{.CoverThumb}}</p>
+                <p class="library-meta">
+                  thumb
+                  {{if .CoverThumbPath}}
+                    <a href="{{.CoverThumbPath}}" target="_blank" rel="noreferrer">{{.CoverThumbLabel}}</a>
+                  {{else}}
+                    {{.CoverThumbLabel}}
+                  {{end}}
+                </p>
               </article>
             {{end}}
           </div>

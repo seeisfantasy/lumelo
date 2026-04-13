@@ -181,6 +181,247 @@ hcitool scan
 - WebUI 是否可打开
 - `/library`、首页、播放控制页是否正常
 
+### 6.6 第六层：真实曲库与 ALSA smoke
+
+若本轮需要继续验证真实媒体链，优先先跑最小 smoke，而不是一开始就上整套业务逻辑：
+
+```sh
+lumelo-media-smoke smoke --skip-play
+lumelo-media-smoke list --first-wav
+lumelo-media-smoke play --first-wav
+```
+
+判定方式：
+
+- `smoke --skip-play` 应能生成 demo `WAV` 并让 `media-indexd` 成功写入 `library.db`
+- `list --first-wav` 应至少返回一条可解析的真实轨道
+- `play --first-wav` 应调用 `aplay -D default` 并正常退出
+- `http://<T4_IP>:18080/library` 应能看到真实条目，而不是全 `0`
+
+注意：
+
+- 这一步验证的是：
+  - 真实媒体文件
+  - 索引写库
+  - `controld` 读库
+  - `ALSA hw` 最小播放链
+- 它当前还不等于：
+  - `playbackd` 已经接入真实解码与真实输出
+  - 首页上的播放控制已经具备最终用户态能力
+
+### 6.7 第七层：`playbackd` 真机输出回归
+
+若本轮要继续验证首页播放控制是否已具备真实用户态能力，至少准备：
+
+- 一首真实 `wav`
+- 一首非 `wav` 轨道
+  - 当前优先用 `m4a/aac`
+
+最低回归集：
+
+- 也可以直接先跑板端 helper：
+  - `lumelo-media-smoke regress-playback --timeout 8`
+  - 如果板子上已经有多个 indexed volume：
+    - `lumelo-media-smoke regress-playback --mount-root /var/lib/lumelo/test-media --timeout 8`
+  - 若要强制指定解码格式：
+    - `lumelo-media-smoke regress-playback --timeout 8 --decoded-format flac`
+  - 若是长时长压缩格式：
+    - `lumelo-media-smoke regress-playback --timeout 8 --decoded-format mp3 --skip-mixed`
+    - `lumelo-media-smoke regress-playback --timeout 8 --decoded-format ogg --skip-mixed`
+  - 若要真的等待长 `mp3` 自然播完并验证自动切歌：
+    - `lumelo-media-smoke regress-playback --timeout 140 --decoded-format mp3`
+  - 若要真的等待长 `ogg` 自然播完并验证自动切歌：
+    - `lumelo-media-smoke regress-playback --mount-root /var/lib/lumelo/test-media --timeout 140 --decoded-format ogg`
+- 对 `wav` 执行：
+  - `play / pause / resume / stop`
+- 对 `m4a/aac` 执行：
+  - `play / pause / resume / stop`
+- 做一次混合队列：
+  - `m4a -> wav`
+  - 等第一首自然播完，看是否自动切到第二首
+- 再补一次：
+  - `prev`
+  - `play_history`
+
+判定方式：
+
+- `wav` 路径应看到：
+  - `aplay -D default <real file>`
+- 已解码非 `wav` 路径应看到：
+  - `aplay -D default -t raw -f S16_LE -c <channels> -r <sample_rate>`
+- `STATUS` 与队列当前项应和真机输出保持一致
+- 长时长 `ogg` 回归通过时，应看到：
+  - 第一首为：
+    - `aplay -D default -t raw -f S16_LE ...`
+  - 自然播完后自动切到：
+    - `aplay -D default /var/lib/lumelo/test-media/Blue Room Sessions/01 - Warmup Tone.wav`
+
+### 6.8 第八层：批量曲库扫描回归
+
+若本轮要确认曲库扫描已经不只是“单首 smoke”，可直接在板子上执行：
+
+```sh
+lumelo-media-smoke regress-library-scan
+```
+
+判定方式：
+
+- helper 会在独立目录下生成多目录、多格式 fixture
+- 也会额外生成专辑封面 fixture：
+  - `Album Alpha/folder.jpg`
+  - `Album Alpha/cover.jpg`
+  - `Album Beta/cover.jpg`
+- 然后执行：
+  - `media-indexd scan-dir <fixture_root>`
+- 最终应输出：
+  - `Library scan regression passed`
+- 当前这条回归通过时，至少会覆盖：
+  - `wav`
+  - `m4a`
+  - `flac`
+  - `mp3`
+  - `ogg`
+- 并且还应覆盖：
+  - `albums = 3`
+  - `covered_tracks = 4`
+  - `artwork refs = 2`
+  - `Album Alpha` 命中 `folder.jpg` 优先级
+
+若这轮还要从 WebUI 再看一眼，执行：
+
+```sh
+curl -fsSL http://192.168.1.121:18080/library | rg "library-cover-art|Album Alpha|Album Beta"
+curl -I http://192.168.1.121:18080/artwork/thumb/320/<hash>.jpg
+```
+
+判定方式：
+
+- `/library` 页面应出现：
+  - `class="library-cover-art"`
+- `/artwork/thumb/320/...jpg` 应返回：
+  - `200 OK`
+  - `Content-Type: image/jpeg`
+
+### 6.9 第九层：tagged 元数据真机回归
+
+若本轮要确认“更像真实用户曲库”的元数据已经贯通到索引与 WebUI，至少补一轮：
+
+- 专辑名
+- 专辑艺人
+- 曲目艺人
+- 年份
+- 流派
+- `disc_no`
+- `track_no`
+- 专辑封面
+
+当前推荐最小样本：
+
+- `Northern Signals`
+  - `Disc 1`
+  - `Disc 2`
+- `Transit Lines`
+
+判定方式：
+
+- `media-indexd scan-dir <tagged_root>` 后，数据库中应能查到：
+  - `album_title`
+  - `album_artist`
+  - `year`
+  - `disc_no`
+  - `track_no`
+  - `genres`
+- `/library` 页面应出现：
+  - 专辑标题
+  - 专辑艺人
+  - 年份
+  - 对应曲目标题与曲目艺人
+  - 封面缩略图
+- 至少再从这套 tagged 曲库里直接点播一首：
+  - 确认不是“只会展示，不会播放”
+
+### 6.10 第十层：外部媒体最小入口
+
+若当前现场还没有把 TF / USB 热插拔链完全做完，至少先确认“已挂载介质如何安全入库”有明确落脚点。
+
+当前可用命令：
+
+```sh
+lumelo-media-import list-mounted
+lumelo-media-import scan-mounted
+lumelo-media-import scan-path /absolute/path/to/media-root
+```
+
+判定方式：
+
+- 没有外部介质时：
+  - `list-mounted` 应返回：
+    - `[]`
+- 对一个显式目录执行：
+  - `scan-path <path>`
+  - 应能成功触发：
+    - `media-indexd scan-dir <path>`
+- 若当前正处于播放期：
+  - 再执行 `scan-path` 或 `scan-mounted`
+  - 应拒绝扫描并返回：
+    - `playback quiet mode is active; refusing media scan unless --force is used`
+
+### 6.11 第十一层：模拟块设备导入回归
+
+若现场暂时没有真 TF / USB 介质，但想先确认“块设备导入主链”是否成立，可以用 loop ISO 做一轮替代回归。
+
+最小流程：
+
+```sh
+losetup -f --show /tmp/lumelo-metadata-suite.iso
+lumelo-media-import import-device /dev/loop0
+lumelo-media-import reconcile-volumes
+```
+
+判定方式：
+
+- `import-device` 应能完成：
+  - 挂载到 `/media/<label>`
+  - 触发 `media-indexd scan-dir <mountpoint>`
+  - 输出稳定 `volume_uuid`
+- 随后数据库中应能查到：
+  - 该 `mountpoint` 下的真实轨道
+- 再至少从这块模拟介质里点播一首：
+  - 验证不是“只会挂载入库，不会播放”
+- 卸载后执行：
+  - `reconcile-volumes`
+  - 数据库中的该 volume 应转为离线
+
+### 6.12 第十二层：稳定性回归
+
+当前板端已补了两条正式回归命令，优先用它们收口“服务恢复”和“坏文件边界”。
+
+执行：
+
+```sh
+lumelo-media-smoke regress-playbackd-restart --mount-root /var/lib/lumelo/test-media-tagged --timeout 8
+lumelo-media-smoke regress-bad-media --timeout 8
+```
+
+判定方式：
+
+- `regress-playbackd-restart`
+  - 应输出：
+    - `Playbackd restart regression passed`
+  - 且应确认：
+    - `queue_entries` 保持
+    - `current_track` 保持
+    - 服务重启后状态回到 `stopped`
+- `regress-bad-media`
+  - 应输出：
+    - `Bad-media regression passed`
+  - 当前允许出现的现状是：
+    - 坏文件仍会被索引
+  - 但必须满足：
+    - 播放坏文件不会拖挂 `playbackd`
+    - 状态会进入 `quiet_error_hold`
+    - 随后有效轨道仍能恢复为 `quiet_active`
+
 ## 7. 典型失败信号与优先怀疑项
 
 - 日志出现 `sshd: no hostkeys available -- exiting`
