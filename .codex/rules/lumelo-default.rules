@@ -1,0 +1,172 @@
+# Lumelo default rules
+# 这些规则只负责“硬风险拦截”，不重复 AGENTS.md 或 skills 里的流程说明。
+# 用法：
+#   codex execpolicy check --pretty --rules .codex/rules/lumelo-default.rules -- <command>
+
+# 1) 默认不允许 Codex 主动创建新 worktree
+prefix_rule(
+    pattern = ["git", "worktree", "add"],
+    decision = "prompt",
+    justification = "Lumelo 默认不主动创建 worktree。只有用户明确要求或隔离高风险大改时才使用。",
+    match = ["git worktree add ../lumelo-review main"],
+)
+
+# 2) 新分支保持提示
+prefix_rule(
+    pattern = ["git", "switch", "-c"],
+    decision = "prompt",
+    justification = "不要擅自开新分支；先由主 agent 说明原因。",
+    match = ["git switch -c tmp-fix"],
+)
+prefix_rule(
+    pattern = ["git", "checkout", "-b"],
+    decision = "prompt",
+    justification = "不要擅自开新分支；先由主 agent 说明原因。",
+    match = ["git checkout -b tmp-fix"],
+)
+
+# 3) 破坏性 Git 命令
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "prompt",
+    justification = "硬重置会直接丢失工作区改动，必须人工确认。",
+    match = ["git reset --hard HEAD"],
+)
+prefix_rule(
+    pattern = ["git", "clean", "-fdx"],
+    decision = "prompt",
+    justification = "会删除未跟踪文件和构建产物，必须人工确认。",
+    match = ["git clean -fdx"],
+)
+prefix_rule(
+    pattern = ["git", "branch", "-D"],
+    decision = "prompt",
+    justification = "强删分支需要人工确认。",
+    match = ["git branch -D tmp-fix"],
+)
+prefix_rule(
+    pattern = ["git", "checkout", "--"],
+    decision = "prompt",
+    justification = "会直接丢弃指定路径的本地改动，必须人工确认。",
+    match = ["git checkout -- docs/README.md"],
+)
+prefix_rule(
+    pattern = ["git", "restore", "--source"],
+    decision = "prompt",
+    justification = "restore --source 会覆盖当前工作区内容，必须人工确认。",
+    match = ["git restore --source HEAD~1 docs/README.md"],
+)
+prefix_rule(
+    pattern = ["git", "push", "--force"],
+    decision = "prompt",
+    justification = "force push 会重写远端历史，必须人工确认。",
+    match = ["git push --force origin main"],
+)
+prefix_rule(
+    pattern = ["git", "push", "--force-with-lease"],
+    decision = "prompt",
+    justification = "force-with-lease 仍会重写远端历史，必须人工确认。",
+    match = ["git push --force-with-lease origin main"],
+)
+
+# 4) 磁盘 / 镜像 / 分区 / 烧录
+prefix_rule(
+    pattern = ["dd"],
+    decision = "prompt",
+    justification = "dd 既可能写文件也可能写块设备。Lumelo 项目默认要求人工确认。",
+    match = ["dd if=foo.img of=/dev/rdisk4 bs=4m status=progress"],
+)
+prefix_rule(
+    pattern = ["fdisk"],
+    decision = "prompt",
+    justification = "分区命令必须人工确认。",
+    match = ["fdisk -l /dev/loop0"],
+)
+prefix_rule(
+    pattern = ["parted"],
+    decision = "prompt",
+    justification = "分区命令必须人工确认。",
+    match = ["parted /dev/loop0 print"],
+)
+prefix_rule(
+    pattern = ["mkfs"],
+    decision = "prompt",
+    justification = "文件系统格式化必须人工确认。",
+    match = ["mkfs.ext4 /dev/loop0p2"],
+)
+prefix_rule(
+    pattern = ["losetup"],
+    decision = "prompt",
+    justification = "loop device 操作可能影响镜像和宿主机设备状态，先确认。",
+    match = ["losetup -Pf image.img"],
+)
+prefix_rule(
+    pattern = ["diskutil"],
+    decision = "prompt",
+    justification = "diskutil 直接操作宿主机磁盘与可移动介质，必须人工确认。",
+    match = ["diskutil unmountDisk /dev/disk4"],
+)
+prefix_rule(
+    pattern = ["mount"],
+    decision = "prompt",
+    justification = "mount 会直接改变宿主机或外接介质状态，必须人工确认。",
+    match = ["mount /dev/disk4s1 /Volumes/TFCARD"],
+)
+prefix_rule(
+    pattern = ["umount"],
+    decision = "prompt",
+    justification = "umount 会直接改变宿主机或外接介质状态，必须人工确认。",
+    match = ["umount /Volumes/TFCARD"],
+)
+
+# 5) 系统级强副作用命令
+prefix_rule(
+    pattern = ["reboot"],
+    decision = "prompt",
+    justification = "reboot 会直接改变当前系统或远端环境状态，必须人工确认。",
+    match = ["reboot"],
+)
+prefix_rule(
+    pattern = ["poweroff"],
+    decision = "prompt",
+    justification = "poweroff 会直接关闭当前系统或远端环境，必须人工确认。",
+    match = ["poweroff"],
+)
+prefix_rule(
+    pattern = ["shutdown"],
+    decision = "prompt",
+    justification = "shutdown 会直接改变当前系统或远端环境状态，必须人工确认。",
+    match = ["shutdown -h now"],
+)
+prefix_rule(
+    pattern = ["systemctl", "reboot"],
+    decision = "prompt",
+    justification = "systemctl reboot 会直接重启目标系统，必须人工确认。",
+    match = ["systemctl reboot"],
+)
+prefix_rule(
+    pattern = ["systemctl", "poweroff"],
+    decision = "prompt",
+    justification = "systemctl poweroff 会直接关闭目标系统，必须人工确认。",
+    match = ["systemctl poweroff"],
+)
+
+# 6) 安全的只读 Git 查询放行
+prefix_rule(
+    pattern = ["git", "status"],
+    decision = "allow",
+    justification = "只读状态查询允许直接执行。",
+    match = ["git status --short"],
+)
+prefix_rule(
+    pattern = ["git", "diff"],
+    decision = "allow",
+    justification = "只读 diff 允许直接执行。",
+    match = ["git diff --stat"],
+)
+prefix_rule(
+    pattern = ["git", "log"],
+    decision = "allow",
+    justification = "只读 log 允许直接执行。",
+    match = ["git log --oneline -20"],
+)

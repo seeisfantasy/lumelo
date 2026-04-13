@@ -1,0 +1,27 @@
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "cached"
+
+[sandbox_workspace_write]
+network_access = true
+
+[agents]
+max_depth = 1
+max_threads = 4
+job_max_runtime_seconds = 1200
+
+[agents.repo_explorer]
+description = "Read-only explorer for docs, code paths, service boundaries, and current-phase routing."
+config_file = ".codex/agents/repo_explorer.toml"
+
+[agents.t4_board_reviewer]
+description = "Read-only reviewer focused on T4 bring-up, rootfs image risks, systemd, firmware, SSH, and wireless chains."
+config_file = ".codex/agents/t4_board_reviewer.toml"
+
+[agents.playback_regression_reviewer]
+description = "Read-only reviewer focused on playbackd/sessiond/media-indexd regressions, Quiet Mode semantics, restart recovery, and bad-media handling."
+config_file = ".codex/agents/playback_regression_reviewer.toml"
+
+[agents.android_provisioning_reviewer]
+description = "Read-only reviewer focused on Android provisioning APK, BLE/classic path, WebView shell, and setup-path diagnostics."
+config_file = ".codex/agents/android_provisioning_reviewer.toml"

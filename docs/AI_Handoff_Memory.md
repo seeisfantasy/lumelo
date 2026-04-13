@@ -20,14 +20,15 @@
 建议按这个顺序读：
 
 1. [README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/README.md)
-2. [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md)
+2. [AI_Handoff_Memory.md](/Volumes/SeeDisk/Codex/Lumelo/docs/AI_Handoff_Memory.md)
 3. [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)
-4. [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
-5. [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)
-6. [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
-7. [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
-8. [apps/android-provisioning/README.md](/Volumes/SeeDisk/Codex/Lumelo/apps/android-provisioning/README.md)
-9. [Real_Device_Findings_20260412_v15.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Real_Device_Findings_20260412_v15.md)
+4. [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md)
+5. [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
+6. [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)
+7. [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
+8. [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
+9. [apps/android-provisioning/README.md](/Volumes/SeeDisk/Codex/Lumelo/apps/android-provisioning/README.md)
+10. [Real_Device_Findings_20260412_v15.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Real_Device_Findings_20260412_v15.md)
    - 只在需要回看 `v15` 原始现场问题时再读
 
 ## 3. 当前项目位置与工作区
@@ -279,6 +280,113 @@ SHA256：
 - [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md) 后半段已进一步减重，只保留长期原则，不再重复维护环境和 bring-up 操作细节
 
 因此新窗口拿到的仓库与文档，当前已经是最新状态。
+
+### 8.1 Codex workflow 规范与文件位置
+
+这轮还额外落了一整套供新窗口直接复用的 Codex workflow 配置。
+
+全局文件位置：
+
+- `/Users/see/.codex/AGENTS.md`
+- `/Users/see/.codex/config.toml`
+
+仓库内文件位置：
+
+- [AGENTS.md](/Volumes/SeeDisk/Codex/Lumelo/AGENTS.md)
+- [config.toml](/Volumes/SeeDisk/Codex/Lumelo/.codex/config.toml)
+- [lumelo-doc-router/SKILL.md](/Volumes/SeeDisk/Codex/Lumelo/.codex/skills/lumelo-doc-router/SKILL.md)
+- [t4-bringup-gate/SKILL.md](/Volumes/SeeDisk/Codex/Lumelo/.codex/skills/t4-bringup-gate/SKILL.md)
+- [playback-regression-gate/SKILL.md](/Volumes/SeeDisk/Codex/Lumelo/.codex/skills/playback-regression-gate/SKILL.md)
+- [android-provisioning-debug/SKILL.md](/Volumes/SeeDisk/Codex/Lumelo/.codex/skills/android-provisioning-debug/SKILL.md)
+- [ai-review-export/SKILL.md](/Volumes/SeeDisk/Codex/Lumelo/.codex/skills/ai-review-export/SKILL.md)
+- [repo_explorer.toml](/Volumes/SeeDisk/Codex/Lumelo/.codex/agents/repo_explorer.toml)
+- [t4_board_reviewer.toml](/Volumes/SeeDisk/Codex/Lumelo/.codex/agents/t4_board_reviewer.toml)
+- [playback_regression_reviewer.toml](/Volumes/SeeDisk/Codex/Lumelo/.codex/agents/playback_regression_reviewer.toml)
+- [android_provisioning_reviewer.toml](/Volumes/SeeDisk/Codex/Lumelo/.codex/agents/android_provisioning_reviewer.toml)
+- [lumelo-default.rules](/Volumes/SeeDisk/Codex/Lumelo/.codex/rules/lumelo-default.rules)
+
+这套规范当前结论：
+
+- 全局 `AGENTS.md` 已明确：
+  - `Think in English`
+  - 对用户回答时，自然语句用中文，专业技术词汇直接用 English
+  - 需求描述可偏中文，但 `React / TypeScript / API / JSON / hook / schema` 等技术对象直接用 English
+  - 以后提到 `img / image / rootfs` 时，统一说“镜像”或直接写 `image / img`，不要说“图像”
+- 仓库 `AGENTS.md` 已明确：
+  - 新窗口文档路由：
+    - `docs/README.md`
+    - `docs/AI_Handoff_Memory.md`
+    - `docs/Development_Progress_Log.md`
+    - `docs/Product_Development_Manual.md`
+    - `docs/T4_Bringup_Checklist.md`
+  - 当前产品边界、服务边界、验证方式、真机风险边界
+  - subagent 使用原则：
+    - 显式触发
+    - 读多写少
+    - 主 agent 收口所有真实写操作与高副作用动作
+- 全局 `config.toml` 当前结论：
+  - `approval_policy = "on-request"`
+  - `sandbox_mode = "workspace-write"`
+  - `web_search = "cached"`
+  - `history = save-all`
+  - `multi_agent = true`
+  - `shell_snapshot = true`
+  - `prevent_idle_sleep = true`
+  - `max_depth = 1`
+  - `max_threads = 4`
+- 仓库 `.codex/config.toml` 当前结论：
+  - `approval_policy = "on-request"`
+  - `sandbox_mode = "workspace-write"`
+  - `network_access = true`
+  - `max_depth = 1`
+  - `max_threads = 4`
+  - 当前没有额外禁用 `/tmp`
+  - `/tmp` 是否单独约束，后续再根据实际 build / 制镜目录决策
+- `.codex/skills/` 当前 5 个 skill 的定位：
+  - `lumelo-doc-router`
+    - 解决“先看哪份文档、哪份是现行规则”
+  - `t4-bringup-gate`
+    - 解决 rootfs / firmware / SSH / 蓝牙 / Wi‑Fi / `systemd` / 启动链的离线 gate 与上板核查
+  - `playback-regression-gate`
+    - 解决 `playbackd / sessiond / media-indexd / lumelo-media-import / ALSA / bad-media / restart recovery`
+  - `android-provisioning-debug`
+    - 解决 Android 配网 APK、classic Bluetooth、encrypted credentials、WebView shell 的诊断路径
+  - `ai-review-export`
+    - 解决给外部 AI 做静态 review 前，先导出 `docs/review/`
+- `.codex/agents/` 当前 4 个 reviewer agent 都是：
+  - `sandbox_mode = "read-only"`
+  - `model_reasoning_effort = "high"`
+  - 角色分别是：
+    - `repo_explorer`
+    - `t4_board_reviewer`
+    - `playback_regression_reviewer`
+    - `android_provisioning_reviewer`
+- `.codex/rules/lumelo-default.rules` 当前只做“硬风险拦截”：
+  - 保留对 destructive Git、磁盘/分区、`losetup`、`diskutil`、挂载、重启/关机等高风险命令的 prompt
+  - 明确不再一刀切拦：
+    - `ssh`
+    - `scp`
+    - `cp`
+    - `rsync`
+    - `rm -rf`
+  - 也就是说：
+    - 高频正常开发动作不乱拦
+    - 真实 destructive 动作才在 rules 层硬拦
+
+### 8.2 新窗口必须知道的额外状态
+
+- 仓库侧这套新加的 `AGENTS.md + .codex/` 当前已经落到工作区
+- 但到本轮结束为止，它们还没有单独提交进 git
+- 新窗口如果要继续推进这套 workflow：
+  - 先看工作区状态
+  - 再决定是否一并提交
+- 当前全局文件：
+  - `/Users/see/.codex/AGENTS.md`
+  - `/Users/see/.codex/config.toml`
+  已经写入本机环境
+- 当前仓库内 `docs/review/` 与
+  - [build-ai-review-docs.py](/Volumes/SeeDisk/Codex/Lumelo/scripts/build-ai-review-docs.py)
+  已可直接用于外部 AI 静态审查
 
 ## 9. 当前已验证事实与真正未闭环事项
 
