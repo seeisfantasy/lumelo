@@ -958,3 +958,38 @@ T4 runtime 状态：
   - current queue entry 被 resolver enrich 为 `Even Heaven`
   - 首页 SSR 中 `播放记录 · 当前播放` 只出现 1 行
   - 首页 SSR 中未出现 `接下来播放` / `队列序号`
+
+### 5.25 2026-05-02：`v24 image` 已产出并过离线 gate
+
+背景：
+
+- 用户明确要求同步 git 并出新 `img`。
+- 本轮 image 用于固化 `v23` 以来的 live/runtime 修复与 WebUI 反馈修复。
+
+已产出：
+
+- [lumelo-t4-rootfs-20260502-v24.img](/Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-20260502-v24.img)
+- [lumelo-t4-rootfs-20260502-v24.img.sha256](/Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-20260502-v24.img.sha256)
+- `sha256 = 945b529810fa39c95e3a707fe65fdac11710d6c8803045ed174db1fbc225229b`
+
+包含修复：
+
+- WebUI 入口切到 `80/tcp`，保留 mDNS / DNS-SD 发布。
+- `playbackd` 自动选择当前唯一 USB DAC，未插 DAC 时明确失败。
+- 生产远程 API 禁止绝对路径播放。
+- `play_history` Play Now 语义修复。
+- 曲库页补本地介质挂载 / 扫描入口。
+- 首页补顺序 / 随机、不循环 / 单曲 / 列表 controls。
+- 首页隐藏 raw command ack，补音频格式显示。
+- DFF / DSF fallback metadata parser，补 `DSD64 / DSD128 / DSD256 / DSD512` rate 显示。
+
+已验证：
+
+- `build-t4-lumelo-rootfs-image.sh`
+- `verify-t4-lumelo-rootfs-image.sh = 0 failure(s), 0 warning(s)`
+- `compare-t4-wireless-golden.sh = 0 failure(s), 0 warning(s)`
+
+尚未验证：
+
+- `v24` 尚未刷入 T4 做 cold boot bring-up。
+- 刷入后还需要复验手机 APK `SCAN -> CONNECT -> SEND WI-FI CREDENTIALS`、WebUI 首页 / 曲库 / 设置、USB DAC 播放 smoke。

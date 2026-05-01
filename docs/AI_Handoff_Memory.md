@@ -266,15 +266,17 @@ APK 输出路径：
 
 最近已产出的 checkpoint image：
 
-- [lumelo-t4-rootfs-20260425-v23.img](/Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-20260425-v23.img)
-- [lumelo-t4-rootfs-20260425-v23.img.sha256](/Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-20260425-v23.img.sha256)
-- `sha256 = 33bd44deeb630544327aa1ef28544e65ecb44b41d63e3adaaf793c30e5618c4e`
+- [lumelo-t4-rootfs-20260502-v24.img](/Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-20260502-v24.img)
+- [lumelo-t4-rootfs-20260502-v24.img.sha256](/Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-20260502-v24.img.sha256)
+- `sha256 = 945b529810fa39c95e3a707fe65fdac11710d6c8803045ed174db1fbc225229b`
 
-`v23` 包含：
+`v24` 包含：
 
-- pseudo-tty `btmgmt` wrapper
-- `bluetoothd -C` compat drop-in
-- verify script 对上述两项的离线检查
+- `v23` 以来的 WebUI `80/tcp`、mDNS / DNS-SD、USB DAC auto-select、absolute path playback boundary、`play_history` 修复。
+- 曲库页本地介质挂载 / 扫描入口。
+- 首页播放模式 controls：顺序 / 随机，不循环 / 单曲 / 列表。
+- 首页隐藏 raw command ack，补用户态音频格式显示。
+- DFF / DSF fallback metadata parser，补 `DSD64 / DSD128 / DSD256 / DSD512` rate 显示。
 
 已验证：
 
@@ -283,7 +285,7 @@ APK 输出路径：
 
 重要：
 
-- `v23` 已存在，但不要主动催用户刷。
+- `v24` 已存在，但不要主动催用户刷。
 - 默认继续在线修。
 - 只有用户明确说出包或刷某个 image 时，再进入镜像交付 / 烧录链。
 
@@ -316,4 +318,4 @@ APK 输出路径：
 3. 若继续板端 classic provisioning 改动：
    - 先 runtime update / live 验证。
    - 不主动出新 image。
-4. 若用户明确说“刷 v23”或“出包”，再按 [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md) 做 bring-up。
+4. 若用户明确说“刷 v24”，再按 [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md) 做 bring-up。
