@@ -118,6 +118,22 @@
               <span id="home-hero-modes">{{orderModeLabel .PlaybackStatus.OrderMode}} · {{repeatModeLabel .PlaybackStatus.RepeatMode}}</span>
               <span id="home-hero-queue-count">{{.PlaybackStatus.QueueEntries}} 首待播</span>
             </p>
+            <p class="home-hero-format-line" id="home-hero-audio-format" {{if not .NowPlaying.AudioFormatLabel}}hidden{{end}}>
+              音频格式：{{.NowPlaying.AudioFormatLabel}}
+            </p>
+            <div class="home-mode-controls">
+              <form method="post" action="/commands" class="home-mode-group" aria-label="播放顺序">
+                <input type="hidden" name="action" value="set_order_mode">
+                <button type="submit" name="track_id" value="sequential" data-order-mode-value="sequential" class="{{if eq .PlaybackStatus.OrderMode "sequential"}}is-active{{end}}">顺序</button>
+                <button type="submit" name="track_id" value="shuffle" data-order-mode-value="shuffle" class="{{if eq .PlaybackStatus.OrderMode "shuffle"}}is-active{{end}}">随机</button>
+              </form>
+              <form method="post" action="/commands" class="home-mode-group" aria-label="循环模式">
+                <input type="hidden" name="action" value="set_repeat_mode">
+                <button type="submit" name="track_id" value="off" data-repeat-mode-value="off" class="{{if eq .PlaybackStatus.RepeatMode "off"}}is-active{{end}}">不循环</button>
+                <button type="submit" name="track_id" value="one" data-repeat-mode-value="one" class="{{if eq .PlaybackStatus.RepeatMode "one"}}is-active{{end}}">单曲</button>
+                <button type="submit" name="track_id" value="all" data-repeat-mode-value="all" class="{{if eq .PlaybackStatus.RepeatMode "all"}}is-active{{end}}">列表</button>
+              </form>
+            </div>
             <form method="post" action="/commands" class="actions home-hero-transport">
               <input type="hidden" name="track_id" value="{{.SuggestedTrackID}}" data-transport-track-id>
               <button type="submit" name="action" value="prev">上一首</button>
@@ -154,6 +170,9 @@
             <p class="playback-hero-title" id="playback-current-track-hero">{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}还没有加入歌曲{{end}}</p>
             <p class="playback-hero-meta" id="home-now-playing-subtitle">
               {{if .NowPlaying.Artist}}{{.NowPlaying.Artist}}{{else if .NowPlaying.RelativePath}}{{.NowPlaying.RelativePath}}{{else}}从曲库挑一张专辑开始播放{{end}}
+            </p>
+            <p class="home-now-playing-format" id="home-now-playing-format" {{if not .NowPlaying.AudioFormatLabel}}hidden{{end}}>
+              音频格式：{{.NowPlaying.AudioFormatLabel}}
             </p>
             <p class="home-now-playing-path" id="home-overview-track">{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}还没有加入歌曲{{end}}</p>
             <p class="home-player-status-line">
@@ -741,6 +760,49 @@
           return `${minutes}:${String(seconds).padStart(2, "0")}`;
         };
 
+        const sampleRateLabel = (sampleRate) => {
+          const rate = Number(sampleRate || 0);
+          if (!rate) {
+            return "";
+          }
+          if (rate >= 1000000) {
+            return `${(rate / 1000000).toFixed(4).replace(/\.?0+$/, "")} MHz`;
+          }
+          return `${(rate / 1000).toFixed(1).replace(/\.?0+$/, "")} kHz`;
+        };
+
+        const dsdRateLabel = (sampleRate) => {
+          switch (Number(sampleRate || 0)) {
+            case 2822400:
+              return "DSD64";
+            case 5644800:
+              return "DSD128";
+            case 11289600:
+              return "DSD256";
+            case 22579200:
+              return "DSD512";
+            default:
+              return "DSD";
+          }
+        };
+
+        const audioFormatLabel = (track) => {
+          if (!track) {
+            return "";
+          }
+          const format = rawValue(track.format).toLowerCase();
+          const formatLabel = format ? format.toUpperCase() : "UNKNOWN";
+          const sampleRate = Number(track.sample_rate || 0);
+          if (format === "dsf" || format === "dff" || format === "dsd") {
+            return sampleRate
+              ? `${dsdRateLabel(sampleRate)} · ${formatLabel} · ${sampleRateLabel(sampleRate)}`
+              : `DSD · ${formatLabel}`;
+          }
+          return sampleRate
+            ? `PCM · ${formatLabel} · ${sampleRateLabel(sampleRate)}`
+            : `PCM · ${formatLabel}`;
+        };
+
         const buildFeaturedAlbums = (librarySnapshot) => {
           const albums = Array.isArray(librarySnapshot?.albums) ? librarySnapshot.albums : [];
           const primary = albums.filter((album) => !(album.source_mode === "directory_fallback" && album.track_count === 1));
@@ -768,7 +830,8 @@
             artist: "",
             albumTitle: "",
             relativePath: "",
-            coverThumbPath: ""
+            coverThumbPath: "",
+            audioFormatLabel: ""
           };
 
           const tracks = Array.isArray(librarySnapshot?.tracks) ? librarySnapshot.tracks : [];
@@ -778,6 +841,7 @@
             result.artist = textValue(trackMatch.artist, "");
             result.albumTitle = textValue(trackMatch.album_title, "");
             result.relativePath = textValue(trackMatch.relative_path, "");
+            result.audioFormatLabel = audioFormatLabel(trackMatch);
             const albums = Array.isArray(librarySnapshot?.albums) ? librarySnapshot.albums : [];
             const albumMatch = albums.find((album) => rawValue(album.album_uid) === rawValue(trackMatch.album_uid));
             if (albumMatch && rawValue(albumMatch.cover_thumb_rel_path)) {
@@ -912,6 +976,8 @@
           const footerTitle = document.getElementById("home-player-title");
           const heroTitle = document.getElementById("home-hero-track-title");
           const heroSubtitle = document.getElementById("home-hero-track-subtitle");
+          const heroFormat = document.getElementById("home-hero-audio-format");
+          const secondaryFormat = document.getElementById("home-now-playing-format");
           if (!image || !placeholder || !caption || !albumLine || !subtitle || !footerTitle || !heroTitle || !heroSubtitle) {
             return;
           }
@@ -941,6 +1007,19 @@
           heroSubtitle.textContent = subtitleText;
           footerTitle.textContent = titleText;
           heroTitle.textContent = titleText;
+          const formatText = rawValue(nowPlaying?.audioFormatLabel);
+          [heroFormat, secondaryFormat].forEach((node) => {
+            if (!node) {
+              return;
+            }
+            if (!formatText) {
+              node.hidden = true;
+              node.textContent = "";
+              return;
+            }
+            node.hidden = false;
+            node.textContent = `音频格式：${formatText}`;
+          });
         };
 
         const setCommandBanners = (message, error) => {
@@ -1024,6 +1103,12 @@
           setText("home-hero-state", playbackStateLabel(payload.state), "已停止");
           setText("home-hero-modes", `${orderModeLabel(payload.order_mode)} · ${repeatModeLabel(payload.repeat_mode)}`, "顺序播放 · 不循环");
           setText("home-hero-queue-count", `${payload.queue_entries ?? 0} 首待播`, "0 首待播");
+          document.querySelectorAll("[data-order-mode-value]").forEach((button) => {
+            button.classList.toggle("is-active", button.getAttribute("data-order-mode-value") === rawValue(payload.order_mode));
+          });
+          document.querySelectorAll("[data-repeat-mode-value]").forEach((button) => {
+            button.classList.toggle("is-active", button.getAttribute("data-repeat-mode-value") === rawValue(payload.repeat_mode));
+          });
         };
 
         const buildHistoryEntry = (entry, displayIndex, isCurrent, librarySnapshot) => {
@@ -1165,7 +1250,7 @@
 	          renderQueue(queueSnapshot);
 	          refreshHomeLibrary(librarySnapshot);
 	          renderHistory(historySnapshot, playbackStatus, librarySnapshot);
-          statusNode.innerHTML = `首页已通过 <code>/api/v1/...</code> 完成 ${reason} 同步。`;
+          statusNode.textContent = "首页内容已同步。";
         };
 
         const schedulePlaybackRefresh = (label) => {
@@ -1190,7 +1275,7 @@
                 setText("playback-current-track-hero", nowPlaying?.title || playbackStatus.current_track, "还没有加入歌曲");
                 setText("home-hero-track-title", nowPlaying?.title || playbackStatus.current_track, "还没有加入歌曲");
               }
-              statusNode.innerHTML = `首页已通过 <code>/api/v1/...</code> 响应 ${label}。`;
+              statusNode.textContent = "播放状态已同步。";
             } catch (error) {
               statusNode.textContent = `首页实时刷新失败：${error.message}。SSR 内容仍然可见。`;
             } finally {
@@ -1210,17 +1295,18 @@
 
           const submitter = event.submitter;
           const formData = new FormData(form);
-          const action = rawValue(submitter && "value" in submitter ? submitter.value : formData.get("action"));
+          const action = rawValue(submitter && submitter.name === "action" && "value" in submitter ? submitter.value : formData.get("action"));
           if (!action) {
             return;
           }
 
           event.preventDefault();
+          const trackID = rawValue(submitter && submitter.name === "track_id" && "value" in submitter ? submitter.value : formData.get("track_id"));
 
           try {
             const result = await postJSON(endpoints.playbackCommands, {
               action,
-              track_id: rawValue(formData.get("track_id"))
+              track_id: trackID
             });
             setCommandBanners(result.data.message, result.data.error);
             renderPlaybackStatus(result.data.playback_status || {});
@@ -1232,7 +1318,7 @@
               setText("playback-current-track-hero", nowPlaying?.title || latestPlaybackStatus.current_track, "还没有加入歌曲");
               setText("home-hero-track-title", nowPlaying?.title || latestPlaybackStatus.current_track, "还没有加入歌曲");
             }
-            statusNode.innerHTML = `首页已通过 <code>/api/v1/playback/commands</code> 执行 ${action}。`;
+            statusNode.textContent = "播放状态已更新。";
           } catch (error) {
             setCommandBanners("", error.message);
             statusNode.textContent = `播放命令 API 失败：${error.message}。旧表单 fallback 仍保留。`;

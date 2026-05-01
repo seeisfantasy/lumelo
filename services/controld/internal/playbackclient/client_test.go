@@ -88,7 +88,7 @@ func TestExecuteFormatsPlayHistoryCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute play_history: %v", err)
 	}
-	if message != "PLAY_HISTORY -> state=quiet_active current=side a track 01" {
+	if message != "" {
 		t.Fatalf("unexpected execute message: %s", message)
 	}
 
@@ -130,7 +130,7 @@ func TestExecuteFormatsQueueReplaceCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute queue_replace: %v", err)
 	}
-	if message != "QUEUE_REPLACE -> state=stopped current=side a 01" {
+	if message != "" {
 		t.Fatalf("unexpected execute message: %s", message)
 	}
 
@@ -172,11 +172,80 @@ func TestPlayQueueFormatsQueuePlayCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("play queue: %v", err)
 	}
-	if message != "QUEUE_PLAY -> state=quiet_active current=side a 01" {
+	if message != "" {
 		t.Fatalf("unexpected execute message: %s", message)
 	}
 
 	<-done
+}
+
+func TestExecuteFormatsPlaybackModeCommands(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       string
+		value        string
+		expectedLine string
+		responseLine string
+	}{
+		{
+			name:         "order mode",
+			action:       "set_order_mode",
+			value:        "shuffle",
+			expectedLine: "SET_ORDER_MODE shuffle\n",
+			responseLine: "OK\tkind=ack\taction=set_order_mode\tstate=quiet_active\tcurrent_track=track-a\n",
+		},
+		{
+			name:         "repeat mode",
+			action:       "set_repeat_mode",
+			value:        "all",
+			expectedLine: "SET_REPEAT_MODE all\n",
+			responseLine: "OK\tkind=ack\taction=set_repeat_mode\tstate=quiet_active\tcurrent_track=track-a\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			socketPath := shortSocketPath(t)
+			listener, err := net.Listen("unix", socketPath)
+			if err != nil {
+				t.Fatalf("listen unix socket: %v", err)
+			}
+			defer listener.Close()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+
+				buf := make([]byte, 256)
+				n, _ := conn.Read(buf)
+				if string(buf[:n]) != tc.expectedLine {
+					t.Errorf("unexpected command line: %q", string(buf[:n]))
+					return
+				}
+
+				_, _ = conn.Write([]byte(tc.responseLine))
+			}()
+
+			client := New(socketPath, "")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			message, err := client.Execute(ctx, tc.action, tc.value)
+			if err != nil {
+				t.Fatalf("execute %s: %v", tc.action, err)
+			}
+			if message != "" {
+				t.Fatalf("unexpected execute message: %s", message)
+			}
+
+			<-done
+		})
+	}
 }
 
 func TestQueueSnapshotParsesSnapshotPayload(t *testing.T) {

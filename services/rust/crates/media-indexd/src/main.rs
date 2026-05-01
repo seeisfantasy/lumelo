@@ -1044,15 +1044,98 @@ fn parse_audio_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
         }
     }
 
+    if metadata.sample_rate.is_none() || metadata.bit_depth.is_none() {
+        if let Some(header_metadata) = dsd_header_metadata(path) {
+            if metadata.sample_rate.is_none() {
+                metadata.sample_rate = header_metadata.sample_rate;
+            }
+            if metadata.bit_depth.is_none() {
+                metadata.bit_depth = header_metadata.bit_depth;
+            }
+        }
+    }
+
     Some(metadata)
 }
 
 fn fallback_probe_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
+    if let Some(metadata) = dsd_header_metadata(path) {
+        return Some(metadata);
+    }
     if !has_known_audio_header(path) {
         return None;
     }
 
     Some(ParsedAudioMetadata::default())
+}
+
+fn dsd_header_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
+    match file_extension(path).as_str() {
+        "dff" => dff_header_metadata(path),
+        "dsf" | "dsd" => dsf_header_metadata(path),
+        _ => None,
+    }
+}
+
+fn dff_header_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
+    let header = read_header_prefix(path, 1024 * 1024)?;
+    if header.len() < 16 || &header[0..4] != b"FRM8" || &header[12..16] != b"DSD " {
+        return None;
+    }
+
+    let marker = find_bytes(&header, b"FS  ")?;
+    if marker + 16 > header.len() {
+        return None;
+    }
+    let payload_size = u64::from_be_bytes(header[marker + 4..marker + 12].try_into().ok()?);
+    if payload_size < 4 {
+        return None;
+    }
+    let sample_rate = u32::from_be_bytes(header[marker + 12..marker + 16].try_into().ok()?);
+    metadata_for_dsd_sample_rate(sample_rate)
+}
+
+fn dsf_header_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
+    let header = read_header_prefix(path, 1024 * 1024)?;
+    if header.len() < 64 || &header[0..4] != b"DSD " {
+        return None;
+    }
+
+    let marker = find_bytes(&header, b"fmt ")?;
+    if marker + 36 > header.len() {
+        return None;
+    }
+    let payload_size = u64::from_le_bytes(header[marker + 4..marker + 12].try_into().ok()?);
+    if payload_size < 40 {
+        return None;
+    }
+    let sample_rate = u32::from_le_bytes(header[marker + 28..marker + 32].try_into().ok()?);
+    let bit_depth = u32::from_le_bytes(header[marker + 32..marker + 36].try_into().ok()?);
+    let mut metadata = metadata_for_dsd_sample_rate(sample_rate)?;
+    if bit_depth > 0 {
+        metadata.bit_depth = Some(i64::from(bit_depth));
+    }
+    Some(metadata)
+}
+
+fn metadata_for_dsd_sample_rate(sample_rate: u32) -> Option<ParsedAudioMetadata> {
+    (sample_rate > 0).then(|| ParsedAudioMetadata {
+        sample_rate: Some(i64::from(sample_rate)),
+        ..ParsedAudioMetadata::default()
+    })
+}
+
+fn read_header_prefix(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    let file = fs::File::open(path).ok()?;
+    let mut buffer = Vec::new();
+    file.take(limit as u64).read_to_end(&mut buffer).ok()?;
+    Some(buffer)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn has_known_audio_header(path: &Path) -> bool {
@@ -2666,17 +2749,28 @@ mod tests {
         write_test_wav(&wav, 44_100, 250);
 
         let dff = temp_path("header-fallback-dff", "dff");
-        fs::write(&dff, b"FRM8\x00\x00\x00\x00DSD ").unwrap();
+        write_test_dff(&dff, 2_822_400);
+
+        let dsf = temp_path("header-fallback-dsf", "dsf");
+        write_test_dsf(&dsf, 5_644_800);
 
         let bogus = temp_path("header-fallback-bogus", "flac");
         fs::write(&bogus, b"lumelo").unwrap();
 
         assert!(fallback_probe_metadata(&wav).is_some());
-        assert!(fallback_probe_metadata(&dff).is_some());
+        assert_eq!(
+            fallback_probe_metadata(&dff).and_then(|metadata| metadata.sample_rate),
+            Some(2_822_400)
+        );
+        assert_eq!(
+            fallback_probe_metadata(&dsf).and_then(|metadata| metadata.sample_rate),
+            Some(5_644_800)
+        );
         assert!(fallback_probe_metadata(&bogus).is_none());
 
         let _ = fs::remove_file(wav);
         let _ = fs::remove_file(dff);
+        let _ = fs::remove_file(dsf);
         let _ = fs::remove_file(bogus);
     }
 
@@ -2776,6 +2870,47 @@ mod tests {
         bytes.extend_from_slice(b"data");
         bytes.extend_from_slice(&data_len.to_le_bytes());
         bytes.resize((44 + data_len) as usize, 0);
+
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn write_test_dff(path: &Path, sample_rate: u32) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FRM8");
+        bytes.extend_from_slice(&32u64.to_be_bytes());
+        bytes.extend_from_slice(b"DSD ");
+        bytes.extend_from_slice(b"FS  ");
+        bytes.extend_from_slice(&4u64.to_be_bytes());
+        bytes.extend_from_slice(&sample_rate.to_be_bytes());
+
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn write_test_dsf(path: &Path, sample_rate: u32) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DSD ");
+        bytes.extend_from_slice(&28u64.to_le_bytes());
+        bytes.extend_from_slice(&80u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&52u64.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1024u64.to_le_bytes());
+        bytes.extend_from_slice(&4096u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
 
         fs::write(path, bytes).unwrap();
     }

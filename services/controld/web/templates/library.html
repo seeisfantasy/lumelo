@@ -125,6 +125,82 @@
         </p>
       </section>
 
+      <section class="card page-main library-media-management">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">本地介质</p>
+            <h2>挂载与扫描</h2>
+          </div>
+          <p class="summary section-summary">
+            这里显示当前插入的 TF / USB 介质。挂载可以在播放时做；完整扫描会触发 media-indexd，只允许在非 Quiet Mode 下手动执行。
+          </p>
+        </div>
+        <p class="banner banner-warn" {{if not .PlaybackScanBlock}}hidden{{end}}>
+          Playback Quiet Mode 正在生效。挂载仍可执行，但扫描已暂时锁定。
+        </p>
+        <p class="banner banner-error" {{if not .MediaSnapshot.Error}}hidden{{end}}>
+          介质检测失败：{{.MediaSnapshot.Error}}
+        </p>
+        <div class="library-media-toolbar">
+          <form method="post" action="{{.LibraryMediaFormPath}}" class="actions library-media-actions">
+            {{if .SelectedAlbumUID}}<input type="hidden" name="album_uid" value="{{.SelectedAlbumUID}}">{{end}}
+            {{if .SelectedDirectoryVolumeUUID}}
+              <input type="hidden" name="volume_uuid" value="{{.SelectedDirectoryVolumeUUID}}">
+              {{if .SelectedDirectoryPath}}<input type="hidden" name="directory" value="{{.SelectedDirectoryPath}}">{{end}}
+            {{end}}
+            <button type="submit" name="action" value="refresh">刷新设备</button>
+            <button type="submit" name="action" value="scan_mounted" {{if .PlaybackScanBlock}}disabled{{end}}>扫描所有已挂载介质</button>
+            <button type="submit" name="action" value="reconcile_volumes">同步挂载状态</button>
+          </form>
+          <form method="post" action="{{.LibraryMediaFormPath}}" class="library-media-path-form">
+            {{if .SelectedAlbumUID}}<input type="hidden" name="album_uid" value="{{.SelectedAlbumUID}}">{{end}}
+            {{if .SelectedDirectoryVolumeUUID}}
+              <input type="hidden" name="volume_uuid" value="{{.SelectedDirectoryVolumeUUID}}">
+              {{if .SelectedDirectoryPath}}<input type="hidden" name="directory" value="{{.SelectedDirectoryPath}}">{{end}}
+            {{end}}
+            <input class="input" type="text" name="scan_path" placeholder="/media/your-usb-or-tf">
+            <button type="submit" name="action" value="scan_path" {{if .PlaybackScanBlock}}disabled{{end}}>选择目录扫描</button>
+          </form>
+        </div>
+        <pre class="log-output library-media-output" {{if not .MediaCommandOutput}}hidden{{end}}>{{.MediaCommandOutput}}</pre>
+        {{if .MediaSnapshot.Devices}}
+          <div class="library-list library-media-device-list" id="library-media-devices-list">
+            {{range .MediaSnapshot.Devices}}
+              <article class="library-item library-media-device">
+                <p class="library-title">
+                  {{if .Label}}{{.Label}}{{else}}{{.Path}}{{end}}
+                  {{if .IsMounted}}
+                    <span class="pill pill-ok">已挂载</span>
+                  {{else}}
+                    <span class="pill pill-offline">未挂载</span>
+                  {{end}}
+                </p>
+                <p class="library-meta">设备路径：{{.Path}}</p>
+                <p class="library-meta">挂载路径：{{if .Mountpoint}}{{.Mountpoint}}{{else}}-{{end}}</p>
+                <p class="library-meta">文件系统：{{if .FSType}}{{.FSType}}{{else}}-{{end}} · transport {{if .Transport}}{{.Transport}}{{else}}-{{end}}</p>
+                <p class="library-meta">volume {{if .VolumeUUID}}{{.VolumeUUID}}{{else}}-{{end}}</p>
+                <form method="post" action="{{$.LibraryMediaFormPath}}" class="actions library-media-actions">
+                  {{if $.SelectedAlbumUID}}<input type="hidden" name="album_uid" value="{{$.SelectedAlbumUID}}">{{end}}
+                  {{if $.SelectedDirectoryVolumeUUID}}
+                    <input type="hidden" name="volume_uuid" value="{{$.SelectedDirectoryVolumeUUID}}">
+                    {{if $.SelectedDirectoryPath}}<input type="hidden" name="directory" value="{{$.SelectedDirectoryPath}}">{{end}}
+                  {{end}}
+                  <input type="hidden" name="device_path" value="{{.Path}}">
+                  {{if not .IsMounted}}
+                    <button type="submit" name="action" value="mount_device">挂载</button>
+                  {{end}}
+                  <button type="submit" name="action" value="scan_device" {{if $.PlaybackScanBlock}}disabled{{end}}>扫描此介质</button>
+                </form>
+              </article>
+            {{end}}
+          </div>
+        {{else}}
+          <p class="summary" id="library-media-devices-empty">
+            当前没有检测到可挂载的 TF / USB 介质。插入后点一次刷新设备。
+          </p>
+        {{end}}
+      </section>
+
       <section class="card page-rail">
         <h2>曲库摘要</h2>
         <p class="status-line">
@@ -476,6 +552,8 @@
         const endpoints = {
           librarySnapshotBase: '{{.LibrarySnapshotPath}}'.split("?")[0],
           libraryCommands: '{{.LibraryCommandsPath}}',
+          libraryMedia: '{{.LibraryMediaPath}}',
+          libraryMediaCommands: '{{.LibraryMediaCommandsPath}}',
           playbackStatus: '{{.PlaybackStatusPath}}',
           playbackQueue: '{{.PlaybackQueuePath}}',
           playbackEvents: '{{.PlaybackStreamPath}}'
@@ -1374,7 +1452,7 @@
           refreshLibraryStatus(librarySnapshot);
           renderLibraryCollections(librarySnapshot, playbackStatus);
           refreshPlaybackBoundary(playbackStatus, queueSnapshot, librarySnapshot);
-          statusNode.innerHTML = `曲库页已通过 <code>/api/v1/...</code> 完成 ${reason} 同步。`;
+          statusNode.textContent = "曲库内容已同步。";
         };
 
         const navigateLibraryQuery = async (query, reason, {historyMode = "push"} = {}) => {
@@ -1401,7 +1479,7 @@
                 fetchJSON(endpoints.playbackQueue)
               ]);
               refreshPlaybackBoundary(playbackStatus, queueSnapshot, latestLibrarySnapshot);
-              statusNode.innerHTML = `曲库页已通过 <code>/api/v1/...</code> 响应 ${label}。`;
+              statusNode.textContent = "播放状态已同步。";
             } catch (error) {
               statusNode.textContent = `曲库页实时刷新失败：${error.message}。SSR 内容仍然可见。`;
             } finally {
@@ -1447,7 +1525,7 @@
             refreshLibraryFocus(latestLibrarySnapshot);
             setCommandBanners(result.data.message, result.data.error);
             refreshPlaybackBoundary(result.data.playback_status || {}, result.data.queue || {}, latestLibrarySnapshot);
-            statusNode.innerHTML = `曲库页已通过 <code>/api/v1/library/commands</code> 执行 ${action}。`;
+            statusNode.textContent = "播放状态已更新。";
           } catch (error) {
             setCommandBanners("", error.message);
             statusNode.textContent = `曲库命令 API 失败：${error.message}。旧表单 fallback 仍保留。`;

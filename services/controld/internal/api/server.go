@@ -17,6 +17,7 @@ import (
 	"github.com/lumelo/controld/internal/audiodevice"
 	"github.com/lumelo/controld/internal/auth"
 	"github.com/lumelo/controld/internal/libraryclient"
+	"github.com/lumelo/controld/internal/mediaimport"
 	"github.com/lumelo/controld/internal/playbackclient"
 	"github.com/lumelo/controld/internal/provisioningclient"
 	"github.com/lumelo/controld/internal/settings"
@@ -27,6 +28,7 @@ type Dependencies struct {
 	Auth             *auth.Service
 	Playback         *playbackclient.Client
 	Library          *libraryclient.Client
+	MediaImport      MediaImportSource
 	Logs             LogSource
 	Provisioning     ProvisioningSource
 	Settings         settings.Config
@@ -47,6 +49,11 @@ type ProvisioningSource interface {
 
 type AudioOutputSource interface {
 	Snapshot(ctx context.Context) audiodevice.Snapshot
+}
+
+type MediaImportSource interface {
+	Snapshot(ctx context.Context) mediaimport.Snapshot
+	Execute(ctx context.Context, request mediaimport.CommandRequest) (mediaimport.CommandResult, error)
 }
 
 type Server struct {
@@ -95,13 +102,18 @@ type libraryViewData struct {
 	LibraryDBPath               string
 	LibrarySnapshotPath         string
 	LibraryCommandsPath         string
+	LibraryMediaPath            string
+	LibraryMediaCommandsPath    string
+	LibraryMediaFormPath        string
 	PlaybackStatusPath          string
 	PlaybackQueuePath           string
 	PlaybackStreamPath          string
 	LibrarySnapshot             libraryclient.Snapshot
+	MediaSnapshot               mediaimport.Snapshot
 	PlaybackStatus              playbackclient.Status
 	QueueSnapshot               playbackclient.QueueSnapshot
 	PlaybackScanBlock           bool
+	MediaCommandOutput          string
 	NowPlaying                  libraryNowPlayingView
 	CommandMessage              string
 	CommandError                string
@@ -198,14 +210,15 @@ type libraryTrackView struct {
 }
 
 type libraryNowPlayingView struct {
-	Known          bool
-	Title          string
-	Artist         string
-	AlbumTitle     string
-	RelativePath   string
-	CoverThumbPath string
-	State          string
-	TrackUID       string
+	Known            bool
+	Title            string
+	Artist           string
+	AlbumTitle       string
+	RelativePath     string
+	CoverThumbPath   string
+	AudioFormatLabel string
+	State            string
+	TrackUID         string
 }
 
 type healthView struct {
@@ -423,6 +436,10 @@ func New(deps Dependencies) (*Server, error) {
 	if audioOutput == nil {
 		audioOutput = audiodevice.New("")
 	}
+	mediaImport := deps.MediaImport
+	if mediaImport == nil {
+		mediaImport = unavailableMediaImportSource{}
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
@@ -544,9 +561,10 @@ func New(deps Dependencies) (*Server, error) {
 		w http.ResponseWriter,
 		r *http.Request,
 		query libraryclient.Query,
-		commandMessage, commandError string,
+		commandMessage, commandError, mediaCommandOutput string,
 	) {
 		snapshot := deps.Library.QuerySnapshot(r.Context(), query)
+		mediaSnapshot := mediaImport.Snapshot(r.Context())
 		playbackStatus := deps.Playback.Status(r.Context())
 		queueSnapshot := deps.Playback.QueueSnapshot(r.Context())
 
@@ -556,13 +574,18 @@ func New(deps Dependencies) (*Server, error) {
 			LibraryDBPath:               deps.Library.LibraryDBPath,
 			LibrarySnapshotPath:         "/api/v1/library/snapshot",
 			LibraryCommandsPath:         "/api/v1/library/commands",
+			LibraryMediaPath:            "/api/v1/library/media",
+			LibraryMediaCommandsPath:    "/api/v1/library/media/commands",
+			LibraryMediaFormPath:        "/library/media/commands",
 			PlaybackStatusPath:          "/api/v1/playback/status",
 			PlaybackQueuePath:           "/api/v1/playback/queue",
 			PlaybackStreamPath:          "/api/v1/playback/events",
 			LibrarySnapshot:             snapshot,
+			MediaSnapshot:               mediaSnapshot,
 			PlaybackStatus:              playbackStatus,
 			QueueSnapshot:               queueSnapshot,
 			PlaybackScanBlock:           playbackBlocksScan(playbackStatus),
+			MediaCommandOutput:          mediaCommandOutput,
 			NowPlaying:                  buildLibraryNowPlayingView(playbackStatus, queueSnapshot, snapshot),
 			CommandMessage:              commandMessage,
 			CommandError:                commandError,
@@ -590,7 +613,7 @@ func New(deps Dependencies) (*Server, error) {
 			return
 		}
 
-		renderLibrary(w, r, libraryQueryFromValues(r.URL.Query()), "", "")
+		renderLibrary(w, r, libraryQueryFromValues(r.URL.Query()), "", "", "")
 	})
 
 	mux.HandleFunc("/library/commands", func(w http.ResponseWriter, r *http.Request) {
@@ -599,7 +622,7 @@ func New(deps Dependencies) (*Server, error) {
 			return
 		}
 		if err := r.ParseForm(); err != nil {
-			renderLibrary(w, r, libraryQueryFromValues(r.Form), "", fmt.Sprintf("parse command form: %v", err))
+			renderLibrary(w, r, libraryQueryFromValues(r.Form), "", fmt.Sprintf("parse command form: %v", err), "")
 			return
 		}
 
@@ -622,11 +645,36 @@ func New(deps Dependencies) (*Server, error) {
 			query,
 		)
 		if err != nil {
-			renderLibrary(w, r, query, "", err.Error())
+			renderLibrary(w, r, query, "", err.Error(), "")
 			return
 		}
 
-		renderLibrary(w, r, query, message, "")
+		renderLibrary(w, r, query, message, "", "")
+	})
+
+	mux.HandleFunc("/library/media/commands", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			renderLibrary(w, r, libraryQueryFromValues(r.Form), "", fmt.Sprintf("parse media command form: %v", err), "")
+			return
+		}
+
+		request := normalizeLibraryMediaCommandRequest(libraryMediaCommandRequest{
+			Action:     r.Form.Get("action"),
+			DevicePath: r.Form.Get("device_path"),
+			ScanPath:   r.Form.Get("scan_path"),
+		})
+		query := libraryQueryFromValues(r.Form)
+		result, err := executeLibraryMediaCommand(r.Context(), mediaImport, deps.Playback, request)
+		if err != nil {
+			renderLibrary(w, r, query, "", err.Error(), result.Output)
+			return
+		}
+
+		renderLibrary(w, r, query, result.Message, "", result.Output)
 	})
 
 	renderLogs := func(w http.ResponseWriter, r *http.Request) {
@@ -771,6 +819,17 @@ func New(deps Dependencies) (*Server, error) {
 		}
 	})
 
+	mux.HandleFunc("/api/v1/library/media", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if err := writeJSON(w, mediaImport.Snapshot(r.Context())); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	mux.HandleFunc("/commands", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -848,6 +907,32 @@ func New(deps Dependencies) (*Server, error) {
 			},
 		)
 		response := buildLibraryCommandResponse(r.Context(), deps, request, message, commandErr)
+		status := http.StatusOK
+		if commandErr != nil {
+			status = http.StatusBadRequest
+		}
+		if err := writeJSONStatus(w, status, response); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/library/media/commands", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		request, err := decodeLibraryMediaCommandRequest(r)
+		if err != nil {
+			response := buildLibraryMediaCommandResponse(r.Context(), deps, mediaImport, libraryMediaCommandRequest{}, mediaimport.CommandResult{}, err)
+			if writeErr := writeJSONStatus(w, http.StatusBadRequest, response); writeErr != nil {
+				http.Error(w, writeErr.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		result, commandErr := executeLibraryMediaCommand(r.Context(), mediaImport, deps.Playback, request)
+		response := buildLibraryMediaCommandResponse(r.Context(), deps, mediaImport, request, result, commandErr)
 		status := http.StatusOK
 		if commandErr != nil {
 			status = http.StatusBadRequest
@@ -973,6 +1058,29 @@ func decodeLibraryCommandRequest(r *http.Request) (libraryCommandRequest, error)
 	return request, nil
 }
 
+func decodeLibraryMediaCommandRequest(r *http.Request) (libraryMediaCommandRequest, error) {
+	var request libraryMediaCommandRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return request, fmt.Errorf("decode library media command request: %w", err)
+	}
+	request = normalizeLibraryMediaCommandRequest(request)
+	if request.Action == "" {
+		return request, fmt.Errorf("action is required")
+	}
+
+	return request, nil
+}
+
+func normalizeLibraryMediaCommandRequest(request libraryMediaCommandRequest) libraryMediaCommandRequest {
+	return libraryMediaCommandRequest{
+		Action:     strings.ToLower(strings.TrimSpace(request.Action)),
+		DevicePath: strings.TrimSpace(request.DevicePath),
+		ScanPath:   strings.TrimSpace(request.ScanPath),
+	}
+}
+
 func executePlaybackCommand(
 	ctx context.Context,
 	playback *playbackclient.Client,
@@ -983,6 +1091,41 @@ func executePlaybackCommand(
 	}
 
 	return playback.Execute(ctx, request.Action, request.TrackID)
+}
+
+func executeLibraryMediaCommand(
+	ctx context.Context,
+	mediaImport MediaImportSource,
+	playback *playbackclient.Client,
+	request libraryMediaCommandRequest,
+) (mediaimport.CommandResult, error) {
+	request = normalizeLibraryMediaCommandRequest(request)
+	result := mediaimport.CommandResult{Action: request.Action}
+	if request.Action == "" {
+		return result, fmt.Errorf("action is required")
+	}
+
+	if mediaCommandRequiresScan(request.Action) {
+		status := playback.Status(ctx)
+		if playbackBlocksScan(status) {
+			return result, fmt.Errorf("playback_quiet_mode_active: stop playback before scanning media")
+		}
+	}
+
+	return mediaImport.Execute(ctx, mediaimport.CommandRequest{
+		Action:     request.Action,
+		DevicePath: request.DevicePath,
+		ScanPath:   request.ScanPath,
+	})
+}
+
+func mediaCommandRequiresScan(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "scan_device", "scan_mounted", "scan_path":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildPlaybackCommandResponse(
@@ -1022,6 +1165,35 @@ func buildLibraryCommandResponse(
 		Message:        message,
 		PlaybackStatus: buildPlaybackStatusView(deps.Playback.Status(ctx)),
 		Queue:          buildPlaybackQueueView(deps.Playback.QueueSnapshot(ctx)),
+	}
+	if commandErr != nil {
+		response.Error = commandErr.Error()
+	}
+
+	return response
+}
+
+func buildLibraryMediaCommandResponse(
+	ctx context.Context,
+	deps Dependencies,
+	mediaImport MediaImportSource,
+	request libraryMediaCommandRequest,
+	result mediaimport.CommandResult,
+	commandErr error,
+) libraryMediaCommandResponse {
+	playbackStatus := deps.Playback.Status(ctx)
+	librarySnapshot := deps.Library.Snapshot(ctx)
+	response := libraryMediaCommandResponse{
+		OK:                  commandErr == nil,
+		Action:              request.Action,
+		DevicePath:          request.DevicePath,
+		ScanPath:            request.ScanPath,
+		Message:             result.Message,
+		Output:              result.Output,
+		PlaybackScanBlocked: playbackBlocksScan(playbackStatus),
+		PlaybackStatus:      buildPlaybackStatusView(playbackStatus),
+		Media:               mediaImport.Snapshot(ctx),
+		Library:             buildLibrarySnapshotView(librarySnapshot),
 	}
 	if commandErr != nil {
 		response.Error = commandErr.Error()
@@ -1077,6 +1249,18 @@ func (unavailableProvisioningSource) Snapshot(context.Context) provisioningclien
 	return provisioningclient.Snapshot{
 		ReadError: "provisioning source is not configured",
 	}
+}
+
+type unavailableMediaImportSource struct{}
+
+func (unavailableMediaImportSource) Snapshot(context.Context) mediaimport.Snapshot {
+	return mediaimport.Snapshot{
+		Error: "media import source is not configured",
+	}
+}
+
+func (unavailableMediaImportSource) Execute(_ context.Context, request mediaimport.CommandRequest) (mediaimport.CommandResult, error) {
+	return mediaimport.CommandResult{Action: strings.ToLower(strings.TrimSpace(request.Action))}, errors.New("media import source is not configured")
 }
 
 func buildQueueEntryViews(snapshot playbackclient.QueueSnapshot) []queueEntryView {
@@ -1345,6 +1529,7 @@ func buildLibraryNowPlayingView(
 		view.Artist = track.Artist
 		view.AlbumTitle = track.AlbumTitle
 		view.RelativePath = track.RelativePath
+		view.AudioFormatLabel = audioOutputFormatLabel(track)
 		for _, album := range snapshot.Albums {
 			if album.AlbumUID != track.AlbumUID || album.CoverThumbRelPath == "" {
 				continue
@@ -1403,6 +1588,51 @@ func formatTrackFormat(track libraryclient.TrackSummary) string {
 	}
 
 	return fmt.Sprintf("%s · %d Hz", track.Format, *track.SampleRate)
+}
+
+func audioOutputFormatLabel(track libraryclient.TrackSummary) string {
+	format := strings.ToLower(strings.TrimSpace(track.Format))
+	formatLabel := strings.ToUpper(format)
+	if formatLabel == "" {
+		formatLabel = "UNKNOWN"
+	}
+
+	if format == "dsf" || format == "dff" || format == "dsd" {
+		if track.SampleRate == nil || *track.SampleRate <= 0 {
+			return "DSD · " + formatLabel
+		}
+		return fmt.Sprintf("%s · %s · %s", dsdRateLabel(*track.SampleRate), formatLabel, sampleRateLabel(*track.SampleRate))
+	}
+
+	if track.SampleRate == nil || *track.SampleRate <= 0 {
+		return "PCM · " + formatLabel
+	}
+
+	return fmt.Sprintf("PCM · %s · %s", formatLabel, sampleRateLabel(*track.SampleRate))
+}
+
+func sampleRateLabel(sampleRate int64) string {
+	if sampleRate >= 1_000_000 {
+		value := float64(sampleRate) / 1_000_000
+		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.4f", value), "0"), ".") + " MHz"
+	}
+	value := float64(sampleRate) / 1_000
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.1f", value), "0"), ".") + " kHz"
+}
+
+func dsdRateLabel(sampleRate int64) string {
+	switch sampleRate {
+	case 2_822_400:
+		return "DSD64"
+	case 5_644_800:
+		return "DSD128"
+	case 11_289_600:
+		return "DSD256"
+	case 22_579_200:
+		return "DSD512"
+	default:
+		return "DSD"
+	}
 }
 
 func intLabel(value int) string {

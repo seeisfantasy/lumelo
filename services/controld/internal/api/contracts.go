@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/lumelo/controld/internal/libraryclient"
+	"github.com/lumelo/controld/internal/mediaimport"
 	"github.com/lumelo/controld/internal/playbackclient"
 	"github.com/lumelo/controld/internal/provisioningclient"
 )
@@ -151,6 +152,12 @@ type libraryCommandRequest struct {
 	Query   libraryQueryView `json:"query,omitempty"`
 }
 
+type libraryMediaCommandRequest struct {
+	Action     string `json:"action"`
+	DevicePath string `json:"device_path,omitempty"`
+	ScanPath   string `json:"scan_path,omitempty"`
+}
+
 type playbackCommandResponse struct {
 	OK             bool               `json:"ok"`
 	Action         string             `json:"action,omitempty"`
@@ -170,6 +177,20 @@ type libraryCommandResponse struct {
 	Error          string             `json:"error,omitempty"`
 	PlaybackStatus playbackStatusView `json:"playback_status"`
 	Queue          playbackQueueView  `json:"queue"`
+}
+
+type libraryMediaCommandResponse struct {
+	OK                  bool                 `json:"ok"`
+	Action              string               `json:"action,omitempty"`
+	DevicePath          string               `json:"device_path,omitempty"`
+	ScanPath            string               `json:"scan_path,omitempty"`
+	Message             string               `json:"message,omitempty"`
+	Output              string               `json:"output,omitempty"`
+	Error               string               `json:"error,omitempty"`
+	PlaybackScanBlocked bool                 `json:"playback_scan_blocked"`
+	PlaybackStatus      playbackStatusView   `json:"playback_status"`
+	Media               mediaimport.Snapshot `json:"media"`
+	Library             librarySnapshotView  `json:"library"`
 }
 
 func buildSystemSummaryView(deps Dependencies, provisioning provisioningclient.Snapshot) systemSummaryView {

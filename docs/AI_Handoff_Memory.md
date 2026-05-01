@@ -137,6 +137,13 @@ Android 工具：
 - 曲库页已补：
   - 无封面专辑默认方形 placeholder
   - 底部 mini player 曲名 / 路径单行省略，防止长文本撑高
+  - `本地介质 / 挂载与扫描` section
+    - 显示当前 TF / USB device path、mountpoint、fstype、volume uuid
+    - 支持刷新设备、挂载、扫描此介质、扫描所有已挂载介质、选择目录扫描、同步挂载状态
+    - 扫描类命令在 `pre_quiet / quiet_active` 时由 `controld` 拦截，避免播放期启动 `media-indexd`
+  - live `T4 192.168.71.12` 已 runtime update 验证：
+    - `/api/v1/library/media` 返回当前 U 盘 `/dev/sda1 -> /media/9cf4bd76f4bd52ee`
+    - `/library` SSR 已出现本地介质管理入口
 
 ## 6. 最近钉死的 classic Bluetooth 根因
 
@@ -225,6 +232,12 @@ APK 输出路径：
 
 - 首页：
   - 封面 / 当前曲目 / controls / queue / recent albums
+  - 已补播放模式 controls：
+    - `顺序 / 随机`
+    - `不循环 / 单曲 / 列表`
+  - 命令成功后不再显示 `PLAY_HISTORY -> state=...` 这类 raw IPC ack。
+  - hero 已补当前曲目音频格式行，例如 `PCM · FLAC · 48 kHz` / `DSD64 · DFF · 2.8224 MHz`。
+  - `media-indexd` 已补 DFF / DSF header fallback，缺 tag/properties 时仍能索引 DSD sample rate。
 - 曲库：
   - album-first
   - 最近专辑 / album detail / tracklist
@@ -243,8 +256,11 @@ APK 输出路径：
 
 - 真实专辑、真实封面、真实队列数据态下的视觉。
 - 真 USB DAC 插入 / 拔出后的设置页显示与 `connected=true` 状态。
+- 曲库 `本地介质` section 的真实扫描按钮尚未人工点击验证；当前只做了只读设备发现和 SSR 验证。
 - 最新镜像刷入后的 Safari 真机复验。
 - 真实播放 smoke 的最新镜像回归。
+- 真实曲目播放到队尾后的 `repeat_mode=one/all` 自动续播行为，本轮只做了 API/UI 和 playbackd 单元验证。
+- 后续新增 DFF / DSF 文件的全量扫描路径已由单元测试覆盖，但尚未在真机重新跑一次完整 `scan-mounted`。
 
 ## 9. 当前 image / 出包状态
 
@@ -292,7 +308,7 @@ APK 输出路径：
 
 如果用户没有新指令，建议按这个顺序继续：
 
-1. 继续在线验证 live `T4 192.168.71.7`。
+1. 继续在线验证 live `T4 192.168.71.12`。
 2. 补 APK recovery 分支专门现场回归：
    - `ack timeout`
    - `write failed`

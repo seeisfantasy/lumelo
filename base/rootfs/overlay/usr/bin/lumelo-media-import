@@ -24,7 +24,7 @@ def run(
     env: Optional[Dict[str, str]] = None,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess:
-    print("$", " ".join(argv))
+    print("$", " ".join(argv), file=sys.stderr)
     return subprocess.run(
         argv,
         check=check,
@@ -213,6 +213,70 @@ def discover_mounted_removable_media() -> List[Dict[str, str]]:
     return results
 
 
+def discover_removable_media_devices() -> List[Dict[str, object]]:
+    completed = run(
+        [
+            "lsblk",
+            "-J",
+            "-o",
+            "NAME,PATH,TYPE,RM,TRAN,LABEL,FSTYPE,MOUNTPOINTS,UUID,PARTUUID",
+        ],
+        capture_output=True,
+    )
+    payload = json.loads(completed.stdout)
+    devices = payload.get("blockdevices", [])
+    results: List[Dict[str, object]] = []
+    seen_paths = set()
+    for device in flatten_lsblk_devices(devices):
+        device_type = str(device.get("type") or "")
+        if device_type not in {"part", "disk"}:
+            continue
+        children = device.get("children")
+        if device_type == "disk" and isinstance(children, list):
+            if any(str(child.get("type") or "") == "part" for child in children):
+                continue
+        removable = bool(device.get("rm"))
+        transport = str(device.get("tran") or "")
+        if not removable and transport != "usb":
+            continue
+
+        device_path = Path(str(device.get("path") or ""))
+        if not str(device_path) or str(device_path) in seen_paths:
+            continue
+        seen_paths.add(str(device_path))
+
+        blkid_info = blkid_export(device_path)
+        mountpoints = normalize_mountpoints(device.get("mountpoints"))
+        active_mountpoints = [
+            item for item in mountpoints if item.startswith(("/media/", "/mnt/"))
+        ]
+        mountpoint = active_mountpoints[0] if active_mountpoints else ""
+        fstype = str(device.get("fstype") or blkid_info.get("TYPE", ""))
+        label = str(device.get("label") or blkid_info.get("LABEL", ""))
+        uuid = str(device.get("uuid") or blkid_info.get("UUID", ""))
+        partuuid = str(device.get("partuuid") or blkid_info.get("PARTUUID", ""))
+
+        results.append(
+            {
+                "name": str(device.get("name") or ""),
+                "path": str(device_path),
+                "type": device_type,
+                "removable": removable,
+                "transport": transport,
+                "label": label,
+                "uuid": uuid,
+                "partuuid": partuuid,
+                "fstype": fstype,
+                "mountpoint": mountpoint,
+                "is_mounted": bool(mountpoint),
+                "volume_uuid": stable_volume_uuid(device_path, blkid_info),
+            }
+        )
+
+    results.sort(key=lambda item: (str(item.get("mountpoint") or ""), str(item.get("path") or "")))
+    return results
+
+
 def scan_dir(path: Path, volume_uuid: Optional[str] = None) -> int:
     if not path.exists():
         print(f"scan path does not exist: {path}", file=sys.stderr)
@@ -278,6 +342,12 @@ def reconcile_volumes(db_path: Path) -> List[Dict[str, object]]:
 def command_list_mounted(_args: argparse.Namespace) -> int:
     mounted = discover_mounted_removable_media()
     print(json.dumps(mounted, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_list_devices(_args: argparse.Namespace) -> int:
+    devices = discover_removable_media_devices()
+    print(json.dumps(devices, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -391,6 +461,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="List currently mounted removable media candidates under /media or /mnt.",
     )
     list_cmd.set_defaults(func=command_list_mounted)
+
+    devices_cmd = subparsers.add_parser(
+        "list-devices",
+        help="List removable USB/TF media devices, including unmounted candidates.",
+    )
+    devices_cmd.set_defaults(func=command_list_devices)
 
     scan_path_cmd = subparsers.add_parser(
         "scan-path",

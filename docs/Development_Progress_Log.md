@@ -729,6 +729,158 @@ T4 runtime 状态：
 - 真机物理拔掉 DAC 后点击 WebUI 播放是否显示 `audio_output_unavailable`。
 - 本轮是 runtime update，尚未刷入新镜像验证 cold boot。
 
+### 5.22 2026-05-02：曲库页补本地介质挂载 / 扫描入口
+
+背景：
+
+- 对照 [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md) 后确认，V1 曲库不应只有已索引专辑 / 文件夹浏览。
+- 曲库页还需要给用户提供当前 TF / USB 介质的路径、挂载状态、手动扫描入口。
+- `media-indexd` 仍必须保持按需 worker，不应在播放期变成高活跃后台。
+
+已修复：
+
+- `lumelo-media-import` 新增 `list-devices`：
+  - 读取 `lsblk`，列出当前可操作的 removable USB / TF device。
+  - 有 partition children 的父级 disk 不再暴露给 UI，避免用户误点 `/dev/sda`。
+  - command trace 改写到 `stderr`，避免污染 JSON stdout。
+- `controld` 新增 media import client：
+  - `GET /api/v1/library/media`
+  - `POST /api/v1/library/media/commands`
+  - SSR form path `/library/media/commands`
+- 曲库页新增 `本地介质 / 挂载与扫描` section：
+  - 显示设备路径、挂载路径、文件系统、volume uuid。
+  - 支持 `刷新设备`、`挂载`、`扫描此介质`、`扫描所有已挂载介质`、`选择目录扫描`、`同步挂载状态`。
+  - `scan_device / scan_mounted / scan_path` 在 `pre_quiet / quiet_active` 时被 `controld` 拦截。
+  - `mount_device / refresh / reconcile_volumes` 仍可在非扫描路径使用。
+
+已验证：
+
+- `python3 -m py_compile base/rootfs/overlay/usr/bin/lumelo-media-import`
+- `go test ./internal/mediaimport ./internal/api`
+- `go test ./...` in `services/controld`
+- live `T4 192.168.71.12` runtime update：
+  - `/usr/bin/controld` 已替换并重启
+  - `/usr/bin/lumelo-media-import` 已替换并 py_compile 通过
+  - `controld.service = active`
+  - `/healthz = ok`
+  - `/api/v1/library/media` 返回当前 U 盘 partition：
+    - `/dev/sda1`
+    - `fstype=ntfs`
+    - `mountpoint=/media/9cf4bd76f4bd52ee`
+    - `volume_uuid=media-uuid-9cf4bd76f4bd52ee`
+  - `/library` SSR 已出现：
+    - `本地介质`
+    - `挂载与扫描`
+    - `扫描所有已挂载介质`
+    - `选择目录扫描`
+    - `扫描此介质`
+    - `/dev/sda1`
+
+尚未验证：
+
+- 本轮未触发真实扫描，避免在未经用户确认时改动当前曲库数据库。
+- 本轮是 runtime update，尚未刷入新镜像验证 cold boot。
+
+### 5.23 2026-05-02：补齐首页播放模式 controls 与用户态播放信息
+
+背景：
+
+- 真机 WebUI 人工反馈：首页只显示 `顺序播放 · 不循环`，没有地方切换播放顺序 / 循环模式。
+- 首页命令成功后会显示 `PLAY_HISTORY -> state=... current=...` 这类 raw IPC ack，不应暴露给普通用户。
+- 首页 hero 缺少当前曲目的音频格式信息。
+
+已修复：
+
+- `ipc-proto` / `playbackd` 新增：
+  - `SET_ORDER_MODE sequential|shuffle`
+  - `SET_REPEAT_MODE off|one|all`
+- `playbackd` mode change 只更新 queue state，不触发播放事件，不写 history。
+- 切换 `shuffle` 时保留当前曲目不变；切回 `sequential` 时恢复自然 queue order，并保持当前播放指针。
+- `controld` playback client 支持 `set_order_mode` / `set_repeat_mode`。
+- 首页 hero 新增：
+  - 顺序 / 随机 segmented controls
+  - 不循环 / 单曲 / 列表 segmented controls
+  - 当前曲目音频格式行，例如 `PCM · FLAC · 48 kHz`
+- 首页和曲库页不再显示 raw API/IPC success message；成功命令只刷新状态，错误仍显示 banner。
+
+已验证：
+
+- `go test ./...` in `services/controld`
+- `cargo test --manifest-path services/rust/Cargo.toml -p ipc-proto -p playbackd`
+- `OrbStack / lumelo-dev` 原生 arm64 release build `playbackd`
+- `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/lumelo-controld-arm64 ./cmd/controld`
+- live `T4 192.168.71.12` runtime update：
+  - `/usr/bin/playbackd` 已替换并重启
+  - `/usr/bin/controld` 已替换并重启
+  - `playbackd.service / controld.service` 均为 `active`
+  - remote sha256 与本地构建产物一致
+  - `/healthz = ok`
+  - `/api/v1/playback/commands`:
+    - `set_repeat_mode=off` 返回 `ok=true`
+    - `set_order_mode=sequential` 返回 `ok=true`
+  - in-app browser 手动回归：
+    - 首页出现 `顺序 / 随机`
+    - 首页出现 `不循环 / 单曲 / 列表`
+    - 点击 `列表` 后显示 `顺序播放 · 列表循环`
+    - 点击 `不循环` 后显示 `顺序播放 · 不循环`
+    - 点击 `随机` 后显示 `随机播放 · 不循环`
+    - 点击 `顺序` 后恢复 `顺序播放 · 不循环`
+    - `home-command-message` 成功 banner 不显示
+    - 页面未出现 `PLAY_HISTORY ->` 或 `state=quiet_active current=`
+    - hero 显示 `音频格式：PCM · FLAC · 48 kHz`
+
+尚未验证：
+
+- 本轮是 runtime update，尚未刷入新镜像验证 cold boot。
+- 真实曲目播放到队尾后的 `repeat_mode=one/all` 自动续播行为，本轮只做了 API/UI 和 playbackd 单元验证。
+
+### 5.24 2026-05-02：修复 DFF / DSF 音频格式缺少 DSD rate
+
+背景：
+
+- 真机 WebUI 人工反馈：DFF 曲目只显示 `音频格式：DSD · DFF`。
+- 用户预期应显示 `DSD64 / DSD128 / DSD256` 这类 DSD rate。
+
+根因：
+
+- `media-indexd` 通过 `lofty` 读取 metadata。
+- DFF / DSF 无法从 tag/properties 读出 `sample_rate` 时，原 fallback 只校验 header，返回空 metadata。
+- 因此 `tracks.sample_rate = NULL`，WebUI 只能显示 `DSD · DFF`。
+
+已修复：
+
+- `media-indexd` fallback metadata 增加 DSD header parser：
+  - DFF / DSDIFF：读取 `FS  ` chunk 的 big-endian sample rate。
+  - DSF：读取 `fmt ` chunk 的 little-endian sample rate。
+- `lofty` 读到 tag 但没有 sample rate 时，也会用 DSD header parser 补齐。
+- `controld` 已有 DSD rate label：
+  - `2822400 -> DSD64`
+  - `5644800 -> DSD128`
+  - `11289600 -> DSD256`
+  - `22579200 -> DSD512`
+
+已验证：
+
+- `cargo test --manifest-path services/rust/Cargo.toml -p media-indexd`
+- `go test ./...` in `services/controld`
+- `OrbStack / lumelo-dev` 原生 arm64 release build `media-indexd`
+- live `T4 192.168.71.12` runtime update：
+  - `/usr/bin/media-indexd` 已替换
+  - remote sha256 与本地构建产物一致
+  - 未重启 `playbackd`，未打断当前播放
+  - header-only metadata update 修正 12 条已索引 DFF/DSF 曲目的 `sample_rate`
+  - 缺失 DSD sample rate count：`12 -> 0`
+  - 首页 SSR 已显示 `音频格式：DSD64 · DFF · 2.8224 MHz`
+
+现场观察：
+
+- 用户重新插拔 DAC 后，当前 live T4 已能正常播放。
+
+尚未验证：
+
+- 本轮是 runtime update，尚未刷入新镜像验证 cold boot。
+- 后续新增 DFF / DSF 文件的全量扫描路径已由单元测试覆盖，但尚未在真机重新跑一次完整 `scan-mounted`。
+
 ### 5.18 2026-04-26：修复 `BUG-P0-005` remote API 绝对路径播放边界
 
 背景：

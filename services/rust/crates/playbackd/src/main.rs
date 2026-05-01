@@ -1094,6 +1094,8 @@ impl RuntimeState {
             PlaybackCommand::QueueRemove(queue_entry_id) => self.queue_remove(&queue_entry_id),
             PlaybackCommand::QueueClear => self.queue_clear(),
             PlaybackCommand::QueueReplace(track_ids) => self.queue_replace(track_ids),
+            PlaybackCommand::SetOrderMode(mode) => self.set_order_mode(&mode),
+            PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(&mode),
             PlaybackCommand::PlayHistory(track_id) => {
                 self.play_history_now(track_id.clone());
                 self.record_current_track_history();
@@ -1203,8 +1205,6 @@ impl RuntimeState {
         let queue_entry_id = self.push_track_entry(track_id.clone());
         self.snapshot.play_order.push(queue_entry_id);
         self.snapshot.current_order_index = Some(self.snapshot.play_order.len().saturating_sub(1));
-        self.snapshot.order_mode = OrderMode::Sequential;
-        self.snapshot.repeat_mode = RepeatMode::Off;
 
         self.playback_state = PlaybackState::QuietActive;
         self.current_track = self.resolved_current_track();
@@ -1228,9 +1228,11 @@ impl RuntimeState {
             };
         }
 
+        let order_mode = self.snapshot.order_mode;
+        let repeat_mode = self.snapshot.repeat_mode;
         self.snapshot = QueueSnapshot {
-            order_mode: OrderMode::Sequential,
-            repeat_mode: RepeatMode::Off,
+            order_mode,
+            repeat_mode,
             current_order_index: None,
             play_order: Vec::new(),
             tracks: Vec::new(),
@@ -1243,6 +1245,8 @@ impl RuntimeState {
         }
 
         self.snapshot.current_order_index = Some(0);
+        let current_queue_entry_id = self.snapshot.play_order.first().cloned();
+        self.rebuild_play_order_for_mode(current_queue_entry_id);
         let track_id = track_ids[0].clone();
         self.playback_state = PlaybackState::QuietActive;
         self.current_track = self.resolved_current_track();
@@ -1415,6 +1419,8 @@ impl RuntimeState {
             self.current_track = None;
         } else {
             self.snapshot.current_order_index = Some(0);
+            let current_queue_entry_id = self.snapshot.play_order.first().cloned();
+            self.rebuild_play_order_for_mode(current_queue_entry_id);
             self.playback_state = PlaybackState::Stopped;
             self.current_track = self.resolved_current_track();
         }
@@ -1436,6 +1442,99 @@ impl RuntimeState {
             persist_queue: true,
             persist_history: false,
         }
+    }
+
+    fn set_order_mode(&mut self, raw_mode: &str) -> CommandOutcome {
+        let Some(mode) = parse_order_mode_value(raw_mode) else {
+            return CommandOutcome {
+                response_line: format_error_line("invalid_order_mode", "unsupported_order_mode"),
+                events: Vec::new(),
+                persist_queue: false,
+                persist_history: false,
+            };
+        };
+
+        let current_queue_entry_id = self.current_queue_entry_id();
+        self.snapshot.order_mode = mode;
+        self.rebuild_play_order_for_mode(current_queue_entry_id);
+        self.current_track = self.resolved_current_track();
+        self.last_command = Some(format!("set_order_mode:{}", order_mode_label(mode)));
+
+        CommandOutcome {
+            response_line: format_ack_line(
+                "set_order_mode",
+                self.playback_state,
+                self.current_track.as_deref(),
+            ),
+            events: Vec::new(),
+            persist_queue: true,
+            persist_history: false,
+        }
+    }
+
+    fn set_repeat_mode(&mut self, raw_mode: &str) -> CommandOutcome {
+        let Some(mode) = parse_repeat_mode_value(raw_mode) else {
+            return CommandOutcome {
+                response_line: format_error_line("invalid_repeat_mode", "unsupported_repeat_mode"),
+                events: Vec::new(),
+                persist_queue: false,
+                persist_history: false,
+            };
+        };
+
+        self.snapshot.repeat_mode = mode;
+        self.last_command = Some(format!("set_repeat_mode:{}", repeat_mode_label(mode)));
+
+        CommandOutcome {
+            response_line: format_ack_line(
+                "set_repeat_mode",
+                self.playback_state,
+                self.current_track.as_deref(),
+            ),
+            events: Vec::new(),
+            persist_queue: true,
+            persist_history: false,
+        }
+    }
+
+    fn current_queue_entry_id(&self) -> Option<String> {
+        self.snapshot
+            .current_order_index
+            .and_then(|index| self.snapshot.play_order.get(index))
+            .cloned()
+    }
+
+    fn rebuild_play_order_for_mode(&mut self, current_queue_entry_id: Option<String>) {
+        let mut play_order = self
+            .snapshot
+            .tracks
+            .iter()
+            .map(|entry| entry.queue_entry_id.clone())
+            .collect::<Vec<_>>();
+
+        if self.snapshot.order_mode == OrderMode::Shuffle {
+            shuffle_queue_entry_ids(&mut play_order);
+            if let Some(current_id) = current_queue_entry_id.as_deref() {
+                if let Some(index) = play_order
+                    .iter()
+                    .position(|entry_id| entry_id == current_id)
+                {
+                    let current_id = play_order.remove(index);
+                    play_order.insert(0, current_id);
+                }
+            }
+        }
+
+        self.snapshot.play_order = play_order;
+        self.snapshot.current_order_index = current_queue_entry_id
+            .as_deref()
+            .and_then(|current_id| {
+                self.snapshot
+                    .play_order
+                    .iter()
+                    .position(|entry_id| entry_id == current_id)
+            })
+            .or_else(|| (!self.snapshot.play_order.is_empty()).then_some(0));
     }
 
     fn step(&mut self, forward: bool) -> CommandOutcome {
@@ -3189,11 +3288,46 @@ fn order_mode_label(mode: OrderMode) -> &'static str {
     }
 }
 
+fn parse_order_mode_value(raw: &str) -> Option<OrderMode> {
+    match raw.trim() {
+        "sequential" => Some(OrderMode::Sequential),
+        "shuffle" => Some(OrderMode::Shuffle),
+        _ => None,
+    }
+}
+
 fn repeat_mode_label(mode: RepeatMode) -> &'static str {
     match mode {
         RepeatMode::Off => "off",
         RepeatMode::One => "one",
         RepeatMode::All => "all",
+    }
+}
+
+fn parse_repeat_mode_value(raw: &str) -> Option<RepeatMode> {
+    match raw.trim() {
+        "off" => Some(RepeatMode::Off),
+        "one" => Some(RepeatMode::One),
+        "all" => Some(RepeatMode::All),
+        _ => None,
+    }
+}
+
+fn shuffle_queue_entry_ids(play_order: &mut [String]) {
+    if play_order.len() < 2 {
+        return;
+    }
+
+    let mut seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    seed ^= (play_order.len() as u64) << 32;
+
+    for index in (1..play_order.len()).rev() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let swap_index = (seed as usize) % (index + 1);
+        play_order.swap(index, swap_index);
     }
 }
 
@@ -3727,6 +3861,72 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn set_order_mode_rebuilds_play_order_without_changing_current_track() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::QueuePlay(vec![
+            "track-a".to_string(),
+            "track-b".to_string(),
+            "track-c".to_string(),
+        ]));
+        state.apply_command(ipc_proto::PlaybackCommand::Next);
+
+        let outcome = state.apply_command(ipc_proto::PlaybackCommand::SetOrderMode(
+            "shuffle".to_string(),
+        ));
+
+        assert_eq!(state.snapshot.order_mode, OrderMode::Shuffle);
+        assert_eq!(state.current_track.as_deref(), Some("track-b"));
+        assert_eq!(state.snapshot.current_order_index, Some(0));
+        assert_eq!(
+            resolve_track_uid(&state.snapshot, Some(0)).as_deref(),
+            Some("track-b")
+        );
+        assert!(outcome.persist_queue);
+        assert!(outcome.events.is_empty());
+
+        state.apply_command(ipc_proto::PlaybackCommand::SetOrderMode(
+            "sequential".to_string(),
+        ));
+
+        assert_eq!(state.snapshot.order_mode, OrderMode::Sequential);
+        assert_eq!(state.snapshot.current_order_index, Some(1));
+        assert_eq!(state.current_track.as_deref(), Some("track-b"));
+        assert_eq!(
+            state
+                .snapshot
+                .play_order
+                .iter()
+                .filter_map(|entry_id| state
+                    .snapshot
+                    .tracks
+                    .iter()
+                    .find(|entry| &entry.queue_entry_id == entry_id)
+                    .map(|entry| entry.track_uid.as_str()))
+                .collect::<Vec<_>>(),
+            vec!["track-a", "track-b", "track-c"]
+        );
+    }
+
+    #[test]
+    fn set_repeat_mode_updates_queue_state_only() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::QueuePlay(vec![
+            "track-a".to_string(),
+            "track-b".to_string(),
+        ]));
+
+        let outcome =
+            state.apply_command(ipc_proto::PlaybackCommand::SetRepeatMode("all".to_string()));
+
+        assert_eq!(state.snapshot.repeat_mode, RepeatMode::All);
+        assert_eq!(state.current_track.as_deref(), Some("track-a"));
+        assert_eq!(state.playback_state, ipc_proto::PlaybackState::QuietActive);
+        assert!(outcome.persist_queue);
+        assert!(!outcome.persist_history);
+        assert!(outcome.events.is_empty());
     }
 
     #[test]

@@ -175,10 +175,7 @@ func (c *Client) Execute(ctx context.Context, action, trackID string) (string, e
 		return fmt.Sprintf("HISTORY_SNAPSHOT -> entries=%d", len(snapshot.Entries)), nil
 	}
 
-	actionName := strings.ToUpper(fields["action"])
-	state := fields["state"]
-	currentTrack := placeholder(fields["current_track"])
-	return fmt.Sprintf("%s -> state=%s current=%s", actionName, state, currentTrack), nil
+	return "", nil
 }
 
 func (c *Client) PlayQueue(ctx context.Context, trackIDs []string) (string, error) {
@@ -314,6 +311,18 @@ func commandLine(action, trackID string) (string, error) {
 			return "", fmt.Errorf("JSON track list is required for QUEUE_PLAY")
 		}
 		return "QUEUE_PLAY " + trackID, nil
+	case "set_order_mode":
+		mode := strings.ToLower(strings.TrimSpace(trackID))
+		if mode != "sequential" && mode != "shuffle" {
+			return "", fmt.Errorf("order mode must be sequential or shuffle")
+		}
+		return "SET_ORDER_MODE " + mode, nil
+	case "set_repeat_mode":
+		mode := strings.ToLower(strings.TrimSpace(trackID))
+		if mode != "off" && mode != "one" && mode != "all" {
+			return "", fmt.Errorf("repeat mode must be off, one, or all")
+		}
+		return "SET_REPEAT_MODE " + mode, nil
 	case "pause":
 		return "PAUSE", nil
 	case "stop":

@@ -125,8 +125,8 @@ V2 前置条件：
 
 ### REQ-P0-001：WebUI 认证、首次密码和 session
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -186,8 +186,8 @@ V2 前置条件：
 
 ### REQ-P0-002：修正 playback event timing
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -237,8 +237,8 @@ V2 前置条件：
 
 ### REQ-P0-003：Quiet Mode 服务切换闭环
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -288,8 +288,8 @@ V2 前置条件：
 
 ### REQ-P0-004：mode manager 最小闭环
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -335,8 +335,8 @@ V2 前置条件：
 
 ### REQ-P0-005：控制面资源边界
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -381,8 +381,8 @@ V2 前置条件：
 
 ### REQ-P0-006：dev/release 安全 profile 与 endpoint 矩阵
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -420,8 +420,8 @@ V2 前置条件：
 
 ### REQ-P0-007：Quiet Mode 中关闭或抑制 mDNS/DNS-SD 广播
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -471,8 +471,8 @@ V2 前置条件：
 
 ### REQ-P0-008：Android APK 检测 `.local` resolver 支持并自动选择入口
 
-类型：requirement  
-优先级：P0  
+类型：requirement
+优先级：P0
 所属里程碑：M1
 
 功能描述：
@@ -524,8 +524,8 @@ V2 前置条件：
 
 ### REQ-P1-001：queue/order/repeat 控制面补齐
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -588,8 +588,8 @@ V2 前置条件：
 
 ### REQ-P1-002：内容错误恢复状态机
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -640,8 +640,8 @@ V2 前置条件：
 
 ### REQ-P1-003：设置系统写入和重启生效契约
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -691,8 +691,8 @@ V2 前置条件：
 
 ### REQ-P1-004：library command 不越过 playbackd 队列权威
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -730,8 +730,8 @@ V2 前置条件：
 
 ### REQ-P1-005：持久化对象 atomic write + fsync contract
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -774,8 +774,8 @@ V2 前置条件：
 
 ### REQ-P1-006：media offline 状态机
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -812,8 +812,8 @@ V2 前置条件：
 
 ### REQ-P1-007：RAM Window Playback design lock
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -849,8 +849,8 @@ V2 前置条件：
 
 ### REQ-P1-008：最低 runtime 权限边界
 
-类型：requirement  
-优先级：P1  
+类型：requirement
+优先级：P1
 所属里程碑：M1
 
 功能描述：
@@ -885,12 +885,61 @@ V2 前置条件：
 - core services 可正常互通。
 - runtime/state/cache 目录权限可被离线检查脚本验证。
 
+### REQ-P1-009：曲库本地介质管理入口
+
+类型：requirement
+优先级：P1
+所属里程碑：M1
+状态：部分已修复，2026-05-02；真实扫描按钮尚未人工触发验证
+
+功能描述：
+
+- V1 曲库必须能表达当前 TF / USB 介质状态，而不是只显示已经进入 `library.db` 的专辑和曲目。
+- 用户需要看到设备路径、挂载路径、文件系统和已索引 volume 的对应关系。
+- 用户需要有明确入口执行挂载、扫描当前介质、扫描所有已挂载介质、选择目录扫描和同步挂载状态。
+- 扫描必须是手动按需动作；播放期不得因为打开曲库页而启动 `media-indexd`。
+
+骨架框架：
+
+- `lumelo-media-import`
+  - `list-devices`
+  - `import-device --mount-only`
+  - `import-device`
+  - `scan-mounted`
+  - `scan-path`
+  - `reconcile-volumes`
+- `controld`
+  - media import client
+  - `GET /api/v1/library/media`
+  - `POST /api/v1/library/media/commands`
+  - SSR form path `/library/media/commands`
+- WebUI
+  - Library page `本地介质 / 挂载与扫描` section
+  - Quiet Mode scan lock warning
+  - device row actions
+
+实现方向：
+
+1. `list-devices` 使用 `lsblk` 只列出可操作的 removable USB / TF device。
+2. 有 partition children 的父级 disk 不暴露给 UI，避免用户误点 `/dev/sdX`。
+3. `controld` 对 `scan_device / scan_mounted / scan_path` 做 Quiet Mode gate。
+4. `mount_device / refresh / reconcile_volumes` 不触发扫描，可作为轻量管理动作。
+5. 真正 scan 仍委托 `lumelo-media-import` 和 `media-indexd`，不把索引逻辑塞进 `controld`。
+
+验收：
+
+- 插入 U 盘 / TF 后，曲库页显示设备路径和挂载路径。
+- 未播放时，用户可以手动扫描当前介质。
+- 播放时，扫描按钮 disabled 或 API 返回明确 `playback_quiet_mode_active`。
+- 打开曲库页本身不会触发扫描。
+- 离线或拔出介质后，状态能由 `reconcile_volumes` 更新。
+
 ## 4. M2/M3 需求池
 
 ### REQ-P2-001：RAM Window Playback MVP
 
-类型：requirement  
-优先级：P2  
+类型：requirement
+优先级：P2
 所属里程碑：M2
 
 功能描述：
@@ -927,8 +976,8 @@ V2 前置条件：
 
 ### REQ-P2-002：大曲库 API 分页和能力字段
 
-类型：requirement  
-优先级：P2  
+类型：requirement
+优先级：P2
 所属里程碑：M2
 
 功能描述：
@@ -962,8 +1011,8 @@ V2 前置条件：
 
 ### REQ-P2-003：正式镜像 systemd hardening
 
-类型：requirement  
-优先级：P2  
+类型：requirement
+优先级：P2
 所属里程碑：M3
 
 功能描述：
@@ -1001,8 +1050,8 @@ V2 前置条件：
 
 ### REQ-P2-004：WebUI legacy port compatibility
 
-类型：requirement  
-优先级：P2  
+类型：requirement
+优先级：P2
 所属里程碑：M2/M3
 
 功能描述：
@@ -1036,8 +1085,8 @@ V2 前置条件：
 
 ### BUG-P0-001：`PLAYBACK_STARTED` 早发
 
-优先级：P0  
-所属里程碑：M1  
+优先级：P0
+所属里程碑：M1
 关联需求：REQ-P0-002
 
 现象：
@@ -1055,8 +1104,8 @@ V2 前置条件：
 
 ### BUG-P0-002：控制 API 无认证和 CSRF
 
-优先级：P0  
-所属里程碑：M1  
+优先级：P0
+所属里程碑：M1
 关联需求：REQ-P0-001
 
 现象：
@@ -1081,8 +1130,8 @@ V2 前置条件：
 
 ### BUG-P0-003：`sessiond` 未执行 freezable services
 
-优先级：P0  
-所属里程碑：M1  
+优先级：P0
+所属里程碑：M1
 关联需求：REQ-P0-003
 
 现象：
@@ -1099,8 +1148,8 @@ V2 前置条件：
 
 ### BUG-P0-004：auth recovery 是 placeholder
 
-优先级：P0  
-所属里程碑：M1  
+优先级：P0
+所属里程碑：M1
 关联需求：REQ-P0-001
 
 现象：
@@ -1118,8 +1167,8 @@ V2 前置条件：
 
 ### BUG-P0-005：生产环境 remote API 可触发绝对路径播放
 
-优先级：P0  
-所属里程碑：M1  
+优先级：P0
+所属里程碑：M1
 关联需求：REQ-P0-001 / REQ-P0-005
 状态：已修复，2026-04-26
 
@@ -1148,8 +1197,8 @@ V2 前置条件：
 
 ### BUG-P0-006：`playbackd.service` 写死 ALSA output device
 
-优先级：P0  
-所属里程碑：M1  
+优先级：P0
+所属里程碑：M1
 状态：已修复，2026-05-02
 
 现象：
@@ -1183,7 +1232,7 @@ V2 前置条件：
 
 ### BUG-P1-001：`media-indexd` 被 local-mode target 直接 Wants
 
-优先级：P1  
+优先级：P1
 所属里程碑：M1
 
 现象：
@@ -1203,8 +1252,8 @@ V2 前置条件：
 
 ### BUG-P1-002：`QUEUE_PLAY` 重置 order/repeat
 
-优先级：P1  
-所属里程碑：M1  
+优先级：P1
+所属里程碑：M1
 关联需求：REQ-P1-001
 
 现象：
@@ -1222,8 +1271,8 @@ V2 前置条件：
 
 ### BUG-P1-003：config fallback 无 UI 告警
 
-优先级：P1  
-所属里程碑：M1  
+优先级：P1
+所属里程碑：M1
 关联需求：REQ-P1-003
 
 现象：
@@ -1241,7 +1290,7 @@ V2 前置条件：
 
 ### BUG-P1-004：rootfs overlay 会打入 ignored artifacts
 
-优先级：P1  
+优先级：P1
 所属里程碑：M1
 
 现象：
@@ -1264,8 +1313,8 @@ V2 前置条件：
 
 ### BUG-P1-005：内容错误 auto-skip 未实现
 
-优先级：P1  
-所属里程碑：M1  
+优先级：P1
+所属里程碑：M1
 关联需求：REQ-P1-002
 
 现象：
@@ -1282,7 +1331,7 @@ V2 前置条件：
 
 ### BUG-P1-006：WebUI 动态表单拼接存在 DOM XSS 风险
 
-优先级：P1  
+优先级：P1
 所属里程碑：M1
 
 现象：
@@ -1303,8 +1352,8 @@ V2 前置条件：
 
 ### BUG-P1-007：失败或秒切路径可能污染 history
 
-优先级：P1  
-所属里程碑：M1  
+优先级：P1
+所属里程碑：M1
 关联需求：REQ-P1-002 / REQ-P1-005
 
 现象：
@@ -1324,7 +1373,7 @@ V2 前置条件：
 
 ### BUG-P2-001：曲库 snapshot 无分页
 
-优先级：P2  
+优先级：P2
 所属里程碑：M1
 
 现象：
@@ -1342,7 +1391,7 @@ V2 前置条件：
 
 ### BUG-P2-002：directory LIKE 未 escape `%` / `_`
 
-优先级：P2  
+优先级：P2
 所属里程碑：M1
 
 现象：
@@ -1361,7 +1410,7 @@ V2 前置条件：
 
 ### BUG-P2-003：systemd unit 缺少 hardening
 
-优先级：P2  
+优先级：P2
 所属里程碑：M1
 
 现象：

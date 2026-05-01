@@ -32,6 +32,8 @@ pub enum PlaybackCommand {
     Next,
     Prev,
     PlayHistory(String),
+    SetOrderMode(String),
+    SetRepeatMode(String),
 }
 
 impl PlaybackCommand {
@@ -61,6 +63,8 @@ impl PlaybackCommand {
             Self::Next => "NEXT".to_string(),
             Self::Prev => "PREV".to_string(),
             Self::PlayHistory(track_id) => format!("PLAY_HISTORY {track_id}"),
+            Self::SetOrderMode(mode) => format!("SET_ORDER_MODE {mode}"),
+            Self::SetRepeatMode(mode) => format!("SET_REPEAT_MODE {mode}"),
         }
     }
 }
@@ -325,9 +329,45 @@ pub fn parse_command_line(line: &str) -> Result<PlaybackCommand, ProtocolError> 
         "QUEUE_REMOVE" => parse_queue_entry_command(payload).map(PlaybackCommand::QueueRemove),
         "QUEUE_REPLACE" => parse_track_list_command(payload).map(PlaybackCommand::QueueReplace),
         "PLAY_HISTORY" => parse_track_command(payload).map(PlaybackCommand::PlayHistory),
+        "SET_ORDER_MODE" => parse_order_mode_command(payload).map(PlaybackCommand::SetOrderMode),
+        "SET_REPEAT_MODE" => parse_repeat_mode_command(payload).map(PlaybackCommand::SetRepeatMode),
         _ => Err(ProtocolError::new(
             "unknown_command",
             format!("unsupported command verb: {verb}"),
+        )),
+    }
+}
+
+fn parse_order_mode_command(payload: Option<&str>) -> Result<String, ProtocolError> {
+    let mode = payload.unwrap_or_default().trim();
+    if mode.is_empty() {
+        return Err(ProtocolError::new(
+            "missing_order_mode",
+            "order mode is required",
+        ));
+    }
+    match mode {
+        "sequential" | "shuffle" => Ok(mode.to_string()),
+        _ => Err(ProtocolError::new(
+            "invalid_order_mode",
+            format!("unsupported order mode: {mode}"),
+        )),
+    }
+}
+
+fn parse_repeat_mode_command(payload: Option<&str>) -> Result<String, ProtocolError> {
+    let mode = payload.unwrap_or_default().trim();
+    if mode.is_empty() {
+        return Err(ProtocolError::new(
+            "missing_repeat_mode",
+            "repeat mode is required",
+        ));
+    }
+    match mode {
+        "off" | "one" | "all" => Ok(mode.to_string()),
+        _ => Err(ProtocolError::new(
+            "invalid_repeat_mode",
+            format!("unsupported repeat mode: {mode}"),
         )),
     }
 }
@@ -771,6 +811,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_playback_mode_commands() {
+        assert_eq!(
+            parse_command_line("SET_ORDER_MODE shuffle").unwrap(),
+            PlaybackCommand::SetOrderMode("shuffle".to_string())
+        );
+        assert_eq!(
+            parse_command_line("SET_REPEAT_MODE all").unwrap(),
+            PlaybackCommand::SetRepeatMode("all".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_playback_modes() {
+        let order_err = parse_command_line("SET_ORDER_MODE random").unwrap_err();
+        assert_eq!(order_err.code, "invalid_order_mode");
+
+        let repeat_err = parse_command_line("SET_REPEAT_MODE forever").unwrap_err();
+        assert_eq!(repeat_err.code, "invalid_repeat_mode");
+    }
+
+    #[test]
     fn queue_replace_encode_round_trips_json() {
         let original = PlaybackCommand::QueueReplace(vec![
             "Album Side A / Track 01".to_string(),
@@ -794,6 +855,22 @@ mod tests {
         let decoded = parse_command_line(&encoded).unwrap();
 
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn playback_mode_encode_round_trips() {
+        for original in [
+            PlaybackCommand::SetOrderMode("sequential".to_string()),
+            PlaybackCommand::SetOrderMode("shuffle".to_string()),
+            PlaybackCommand::SetRepeatMode("off".to_string()),
+            PlaybackCommand::SetRepeatMode("one".to_string()),
+            PlaybackCommand::SetRepeatMode("all".to_string()),
+        ] {
+            let encoded = original.encode();
+            let decoded = parse_command_line(&encoded).unwrap();
+
+            assert_eq!(decoded, original);
+        }
     }
 
     #[test]

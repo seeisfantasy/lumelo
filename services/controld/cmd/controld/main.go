@@ -11,6 +11,7 @@ import (
 	"github.com/lumelo/controld/internal/auth"
 	"github.com/lumelo/controld/internal/libraryclient"
 	"github.com/lumelo/controld/internal/logclient"
+	"github.com/lumelo/controld/internal/mediaimport"
 	"github.com/lumelo/controld/internal/playbackclient"
 	"github.com/lumelo/controld/internal/provisioningclient"
 	"github.com/lumelo/controld/internal/settings"
@@ -37,11 +38,13 @@ func main() {
 	artworkCacheRoot := getenv("CONTROLD_ARTWORK_CACHE_DIR", "/var/cache/lumelo/artwork")
 	provisioningStatusPath := getenv("CONTROLD_PROVISIONING_STATUS_PATH", filepath.Join(runtimeDir, "provisioning-status.json"))
 	alsaCardsPath := getenv("CONTROLD_ALSA_CARDS_PATH", "")
+	mediaImportCommand := getenv("CONTROLD_MEDIA_IMPORT_BIN", "lumelo-media-import")
 
 	server, err := api.New(api.Dependencies{
 		Auth:             auth.NewService(false),
 		Playback:         playbackclient.New(commandSocket, eventSocket),
 		Library:          libraryclient.New(libraryDBPath),
+		MediaImport:      mediaimport.New(mediaImportCommand, libraryDBPath),
 		Logs:             logclient.New(),
 		Provisioning:     provisioningclient.New(provisioningStatusPath),
 		AudioOutput:      audiodevice.New(alsaCardsPath),

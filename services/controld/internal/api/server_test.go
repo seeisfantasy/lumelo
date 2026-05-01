@@ -16,6 +16,7 @@ import (
 	"github.com/lumelo/controld/internal/audiodevice"
 	"github.com/lumelo/controld/internal/auth"
 	"github.com/lumelo/controld/internal/libraryclient"
+	"github.com/lumelo/controld/internal/mediaimport"
 	"github.com/lumelo/controld/internal/playbackclient"
 	"github.com/lumelo/controld/internal/provisioningclient"
 	"github.com/lumelo/controld/internal/settings"
@@ -509,6 +510,175 @@ func TestAPILibrarySnapshotReturnsStructuredLibraryData(t *testing.T) {
 	}
 }
 
+func TestAPILibraryMediaReturnsDetectedDevices(t *testing.T) {
+	mediaSource := &fakeMediaImportSource{
+		snapshot: mediaimport.Snapshot{
+			Available: true,
+			Devices: []mediaimport.Device{{
+				Label:      "TF Music",
+				Path:       "/dev/sda1",
+				FSType:     "exfat",
+				Mountpoint: "/media/tf-music",
+				IsMounted:  true,
+				VolumeUUID: "media-uuid-demo",
+			}},
+		},
+	}
+	server := newServerWithDeps(t, api.Dependencies{
+		Auth:         auth.NewService(false),
+		Playback:     playbackclient.New(filepath.Join(t.TempDir(), "missing-playback-cmd.sock"), filepath.Join(t.TempDir(), "missing-playback-evt.sock")),
+		Library:      libraryclient.New(filepath.Join(t.TempDir(), "missing-library.db")),
+		MediaImport:  mediaSource,
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/library/media", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+
+	var payload mediaimport.Snapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode library media response: %v", err)
+	}
+	if !payload.Available || len(payload.Devices) != 1 || payload.Devices[0].Path != "/dev/sda1" || payload.Devices[0].Mountpoint != "/media/tf-music" {
+		t.Fatalf("unexpected media payload: %+v", payload)
+	}
+}
+
+func TestAPILibraryMediaCommandsBlockScansDuringQuietMode(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := servePlaybackSequence(t, listener, []playbackExchange{
+		{
+			expectedLine: "STATUS\n",
+			responseLine: "OK\tkind=status\tstate=quiet_active\torder_mode=sequential\trepeat_mode=off\tcurrent_track=track-001\tlast_command=status\tqueue_entries=1\n",
+		},
+		{
+			expectedLine: "STATUS\n",
+			responseLine: "OK\tkind=status\tstate=quiet_active\torder_mode=sequential\trepeat_mode=off\tcurrent_track=track-001\tlast_command=status\tqueue_entries=1\n",
+		},
+	})
+	mediaSource := &fakeMediaImportSource{snapshot: mediaimport.Snapshot{Available: true}}
+	server := newServerWithDeps(t, api.Dependencies{
+		Auth:         auth.NewService(false),
+		Playback:     playbackclient.New(socketPath, filepath.Join(t.TempDir(), "unused-evt.sock")),
+		Library:      libraryclient.New(filepath.Join(t.TempDir(), "missing-library.db")),
+		MediaImport:  mediaSource,
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/library/media/commands", strings.NewReader(`{"action":"scan_mounted"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	if mediaSource.executeCount != 0 {
+		t.Fatalf("expected scan to be blocked before media import execution")
+	}
+
+	var payload struct {
+		OK                  bool   `json:"ok"`
+		Error               string `json:"error"`
+		PlaybackScanBlocked bool   `json:"playback_scan_blocked"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode library media command response: %v", err)
+	}
+	if payload.OK || !payload.PlaybackScanBlocked || !strings.Contains(payload.Error, "playback_quiet_mode_active") {
+		t.Fatalf("unexpected blocked media command payload: %+v", payload)
+	}
+
+	<-done
+}
+
+func TestAPILibraryMediaCommandsExecuteNonScanAction(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := servePlaybackSequence(t, listener, []playbackExchange{
+		{
+			expectedLine: "STATUS\n",
+			responseLine: "OK\tkind=status\tstate=stopped\torder_mode=sequential\trepeat_mode=off\tcurrent_track=\tlast_command=status\tqueue_entries=0\n",
+		},
+	})
+	mediaSource := &fakeMediaImportSource{
+		snapshot: mediaimport.Snapshot{Available: true},
+		result: mediaimport.CommandResult{
+			Action:  "reconcile_volumes",
+			Message: "media volumes reconciled",
+			Output:  `{"reconciled":[]}`,
+		},
+	}
+	server := newServerWithDeps(t, api.Dependencies{
+		Auth:         auth.NewService(false),
+		Playback:     playbackclient.New(socketPath, filepath.Join(t.TempDir(), "unused-evt.sock")),
+		Library:      libraryclient.New(filepath.Join(t.TempDir(), "missing-library.db")),
+		MediaImport:  mediaSource,
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/library/media/commands", strings.NewReader(`{"action":"reconcile_volumes"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	if mediaSource.executeCount != 1 || mediaSource.lastRequest.Action != "reconcile_volumes" {
+		t.Fatalf("unexpected media command execution: count=%d request=%+v", mediaSource.executeCount, mediaSource.lastRequest)
+	}
+
+	var payload struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+		Output  string `json:"output"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode library media command response: %v", err)
+	}
+	if !payload.OK || payload.Message != "media volumes reconciled" || payload.Output == "" || payload.Error != "" {
+		t.Fatalf("unexpected media command payload: %+v", payload)
+	}
+
+	<-done
+}
+
 func TestAPIPlaybackCommandsReturnsStructuredResult(t *testing.T) {
 	socketPath := shortSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
@@ -574,7 +744,7 @@ func TestAPIPlaybackCommandsReturnsStructuredResult(t *testing.T) {
 		t.Fatalf("decode playback command response: %v", err)
 	}
 
-	if !payload.OK || payload.Action != "pause" || payload.Message == "" || payload.Error != "" {
+	if !payload.OK || payload.Action != "pause" || payload.Message != "" || payload.Error != "" {
 		t.Fatalf("unexpected playback command payload: %+v", payload)
 	}
 	if payload.PlaybackStatus.State != "paused" || payload.PlaybackStatus.CurrentTrack != "track-002" {
@@ -694,7 +864,7 @@ func TestAPILibraryCommandsReturnsStructuredPlayFromHereResult(t *testing.T) {
 	if !payload.OK || payload.Action != "play" || payload.TrackID != "track-001" || payload.Query.AlbumUID != "album-001" {
 		t.Fatalf("unexpected library command payload: %+v", payload)
 	}
-	if payload.Message == "" || payload.Error != "" {
+	if payload.Message != "" || payload.Error != "" {
 		t.Fatalf("unexpected library command result fields: %+v", payload)
 	}
 	if payload.PlaybackStatus.State != "quiet_active" || payload.PlaybackStatus.CurrentTrack != "track-001" || payload.PlaybackStatus.QueueEntries != 2 {
@@ -769,6 +939,8 @@ func TestLibraryPageBootstrapsReadOnlyAPIContractForLiveSections(t *testing.T) {
 	for _, fragment := range []string{
 		"api\\/v1\\/library\\/snapshot",
 		"api\\/v1\\/library\\/commands",
+		"api\\/v1\\/library\\/media",
+		"api\\/v1\\/library\\/media\\/commands",
 		"api\\/v1\\/playback\\/status",
 		"api\\/v1\\/playback\\/queue",
 		"api\\/v1\\/playback\\/events",
@@ -796,6 +968,59 @@ func TestLibraryPageBootstrapsReadOnlyAPIContractForLiveSections(t *testing.T) {
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected library page to expose API render hook %s, body: %s", fragment, body)
+		}
+	}
+}
+
+func TestLibraryPageRendersMediaImportControls(t *testing.T) {
+	dbPath := writeLibraryFixture(t)
+	server := newServerWithDeps(t, api.Dependencies{
+		Auth:     auth.NewService(false),
+		Playback: playbackclient.New(filepath.Join(t.TempDir(), "missing-playback-cmd.sock"), filepath.Join(t.TempDir(), "missing-playback-evt.sock")),
+		Library:  libraryclient.New(dbPath),
+		MediaImport: &fakeMediaImportSource{
+			snapshot: mediaimport.Snapshot{
+				Available: true,
+				Devices: []mediaimport.Device{{
+					Label:      "TF Music",
+					Path:       "/dev/sda1",
+					FSType:     "exfat",
+					Mountpoint: "/media/tf-music",
+					IsMounted:  true,
+					VolumeUUID: "media-uuid-demo",
+				}},
+			},
+		},
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/library", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, fragment := range []string{
+		"本地介质",
+		"挂载与扫描",
+		"刷新设备",
+		"扫描所有已挂载介质",
+		"选择目录扫描",
+		"TF Music",
+		"/dev/sda1",
+		"/media/tf-music",
+		"扫描此介质",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected library page media controls to include %s, body: %s", fragment, body)
 		}
 	}
 }
@@ -923,6 +1148,8 @@ func TestHomePageBootstrapsReadOnlyAPIContractForLiveSections(t *testing.T) {
 		"api\\/v1\\/playback\\/status",
 		"api\\/v1\\/playback\\/queue",
 		"api\\/v1\\/playback\\/events",
+		"data-order-mode-value=\"sequential\"",
+		"data-repeat-mode-value=\"all\"",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected home page to reference %s, body: %s", fragment, body)
@@ -931,6 +1158,119 @@ func TestHomePageBootstrapsReadOnlyAPIContractForLiveSections(t *testing.T) {
 	if strings.Contains(body, "window.location.reload()") {
 		t.Fatalf("expected home page to refresh sections via API instead of full reload, body: %s", body)
 	}
+}
+
+func TestHomePageRendersNowPlayingAudioFormat(t *testing.T) {
+	dbPath := writeLibraryFixture(t)
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := servePlaybackSequence(t, listener, []playbackExchange{
+		{
+			expectedLine: "STATUS\n",
+			responseLine: "OK\tkind=status\tstate=quiet_active\torder_mode=sequential\trepeat_mode=off\tcurrent_track=track-001\tlast_command=play:track-001\tqueue_entries=1\n",
+		},
+		{
+			expectedLine: "QUEUE_SNAPSHOT\n",
+			responseLine: "OK\tkind=queue_snapshot\tpayload={\"order_mode\":\"sequential\",\"repeat_mode\":\"off\",\"current_order_index\":0,\"entries\":[{\"order_index\":0,\"queue_entry_id\":\"q1\",\"track_uid\":\"track-001\",\"volume_uuid\":\"vol-001\",\"relative_path\":\"/Albums/Blue Room Sessions/01-opening.flac\",\"title\":\"Opening\",\"duration_ms\":201000,\"is_current\":true}]}\n",
+		},
+		{
+			expectedLine: "HISTORY_SNAPSHOT\n",
+			responseLine: "OK\tkind=history_snapshot\tpayload={\"entries\":[]}\n",
+		},
+	})
+
+	server := newServerWithDeps(t, api.Dependencies{
+		Auth:         auth.NewService(false),
+		Playback:     playbackclient.New(socketPath, filepath.Join(t.TempDir(), "unused-evt.sock")),
+		Library:      libraryclient.New(dbPath),
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "音频格式：PCM · FLAC · 44.1 kHz") {
+		t.Fatalf("expected now playing audio format on home page, body: %s", response.Body.String())
+	}
+
+	<-done
+}
+
+func TestHomePageRendersDSDRateAudioFormat(t *testing.T) {
+	dbPath := writeLibraryFixture(t)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	if _, err := db.Exec("UPDATE tracks SET format = 'dff', sample_rate = 2822400 WHERE track_uid = 'track-001'"); err != nil {
+		t.Fatalf("update fixture track format: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite db: %v", err)
+	}
+
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := servePlaybackSequence(t, listener, []playbackExchange{
+		{
+			expectedLine: "STATUS\n",
+			responseLine: "OK\tkind=status\tstate=quiet_active\torder_mode=sequential\trepeat_mode=off\tcurrent_track=track-001\tlast_command=play:track-001\tqueue_entries=1\n",
+		},
+		{
+			expectedLine: "QUEUE_SNAPSHOT\n",
+			responseLine: "OK\tkind=queue_snapshot\tpayload={\"order_mode\":\"sequential\",\"repeat_mode\":\"off\",\"current_order_index\":0,\"entries\":[{\"order_index\":0,\"queue_entry_id\":\"q1\",\"track_uid\":\"track-001\",\"volume_uuid\":\"vol-001\",\"relative_path\":\"/Albums/Blue Room Sessions/01-opening.dff\",\"title\":\"Opening\",\"duration_ms\":201000,\"is_current\":true}]}\n",
+		},
+		{
+			expectedLine: "HISTORY_SNAPSHOT\n",
+			responseLine: "OK\tkind=history_snapshot\tpayload={\"entries\":[]}\n",
+		},
+	})
+
+	server := newServerWithDeps(t, api.Dependencies{
+		Auth:         auth.NewService(false),
+		Playback:     playbackclient.New(socketPath, filepath.Join(t.TempDir(), "unused-evt.sock")),
+		Library:      libraryclient.New(dbPath),
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "音频格式：DSD64 · DFF · 2.8224 MHz") {
+		t.Fatalf("expected DSD rate on home page, body: %s", response.Body.String())
+	}
+
+	<-done
 }
 
 func TestProvisioningStatusReturnsLatestSnapshot(t *testing.T) {
@@ -1347,4 +1687,25 @@ type fakeAudioOutputSource struct {
 
 func (f *fakeAudioOutputSource) Snapshot(context.Context) audiodevice.Snapshot {
 	return f.snapshot
+}
+
+type fakeMediaImportSource struct {
+	snapshot     mediaimport.Snapshot
+	result       mediaimport.CommandResult
+	err          error
+	lastRequest  mediaimport.CommandRequest
+	executeCount int
+}
+
+func (f *fakeMediaImportSource) Snapshot(context.Context) mediaimport.Snapshot {
+	return f.snapshot
+}
+
+func (f *fakeMediaImportSource) Execute(_ context.Context, request mediaimport.CommandRequest) (mediaimport.CommandResult, error) {
+	f.lastRequest = request
+	f.executeCount++
+	if f.result.Action == "" {
+		f.result.Action = request.Action
+	}
+	return f.result, f.err
 }
