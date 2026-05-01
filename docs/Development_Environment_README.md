@@ -158,41 +158,76 @@
 - `SSH_AUTHORIZED_KEYS_FILE` 仍保留为可选能力，用于注入 `/root/.ssh/authorized_keys`
 - 正式发布镜像的 SSH 默认值仍以产品手册为准，不因开发图便捷性而改变
 
+### 4.6 当前测试镜像默认 SSH 登录信息
+
+这条作为当前 `T4` 开发 / 测试镜像的环境约定维护在这里，后续不要再靠交接记忆：
+
+- 用户名：`root`
+- 密码：`root`
+- 适用范围：当前开发 / bring-up / 测试镜像
+- 不适用范围：正式发布镜像；正式口径仍以 [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md) 为准
+
+最小登录示例：
+
+```sh
+ssh root@<T4_IP>
+# password: root
+```
+
 ## 5. Lumelo 当前文件系统与工作区方案
 
 ### 5.1 当前状态
 
-- `SeeDisk`：`exFAT`
-- `LumeloDev`：`APFS`
+- `SeeDisk`：`APFS`
+- 当前默认 macOS 主工作区：
+  - `/Volumes/SeeDisk/Codex/Lumelo`
 
-当前已建立：
+当前结论：
 
-- sparsebundle 文件：`/Volumes/SeeDisk/Codex/Lumelo-dev.sparsebundle`
-- APFS 挂载卷：`/Volumes/LumeloDev`
-- 当前推荐 macOS 主工作区：`/Volumes/LumeloDev/Codex/Lumelo`
+- 外置盘本体既然已经是 `APFS`
+  - 就不再需要为了规避 `exFAT` 风险而额外套一层 `APFS sparsebundle`
+- 旧的 `LumeloDev` 工作区
+  - 现在只保留为历史 workaround / 兼容入口
+  - 不再作为当前默认开发入口
 
-### 5.2 为什么要这样做
+### 5.2 为什么现在可以直接用 `SeeDisk`
 
 这一步不是为了 Android 模拟器，也不是为了替代 Android 真机。
 
-它解决的是：
+之前额外建立 `LumeloDev` 的根因是：
 
 - macOS 主机在 `exFAT` 上工作时的 `._*` 污染
-- Android 构建链对侧写文件敏感的问题
-- 未来其他元数据敏感工具链的类似风险
+- Android 构建链对侧写文件敏感
+- 未来其他元数据敏感工具链也可能踩同类坑
+
+现在 `SeeDisk` 本体已经改成 `APFS` 后：
+
+- 这些 `exFAT` 特有风险不再是当前默认环境问题
+- 当前仓库可以直接留在：
+  - `/Volumes/SeeDisk/Codex/Lumelo`
+- 不再需要先同步到另一个 `APFS sparsebundle` 再开始开发
 
 ### 5.3 与 Linux 开发链的关系
 
-- `lumelo-dev` 可以直接访问 `/Volumes/LumeloDev/Codex/Lumelo`
-- 所以这个 APFS 工作区不只兼容 Android，也兼容当前 Linux 虚拟机工作流
-- 需要注意的是：Linux 使用的是宿主共享目录，不是“Linux 原生挂载 APFS”
+- `lumelo-dev` 可以直接访问：
+  - `/Volumes/SeeDisk/Codex/Lumelo`
+- 所以当前这套 `APFS` 外置盘工作区，同时兼容：
+  - macOS 编辑 / Android Studio
+  - `OrbStack / lumelo-dev`
+- 需要继续注意的是：
+  - Linux 看到的是宿主共享目录
+  - 不是“Linux 原生挂载 APFS”
+  - 所以重负载临时目录仍应放：
+    - `/var/tmp/lumelo-<tag>/`
 
 ## 6. 当前项目下的辅助脚本
 
 - [mount-lumelodev-apfs.sh](/Volumes/SeeDisk/Codex/Lumelo/scripts/mount-lumelodev-apfs.sh)
-  - 若开发卷未挂载，则挂载 `LumeloDev`
+  - 旧 `LumeloDev` 兼容脚本
+  - 仅在需要回看或复用历史 `APFS sparsebundle` 工作区时再用
 - [sync-to-lumelodev-apfs.sh](/Volumes/SeeDisk/Codex/Lumelo/scripts/sync-to-lumelodev-apfs.sh)
-  - 将当前工作区同步到 APFS 主工作区
+  - 旧 `LumeloDev` 同步脚本
+  - 当前默认流程已不再依赖它
   - 同步时排除：
     - `._*`
     - `out/`
@@ -212,7 +247,7 @@
 ### 7.1 固定约束
 
 - 活跃源码目录统一使用：
-  - `/Volumes/LumeloDev/Codex/Lumelo`
+  - `/Volumes/SeeDisk/Codex/Lumelo`
 - 重负载临时目录统一使用 Linux 原生目录：
   - `/var/tmp/lumelo-<build-tag>/`
 - 不再把 `LUMELO_BUILD_ROOT`、`TMPDIR`、`CARGO_TARGET_DIR`、`GOCACHE` 放到：
@@ -224,27 +259,49 @@
   - 不因日期变化重置
   - 新图出包前先确认当前最新序号，再顺延 `+1`
 
+### 7.1.1 出包触发规则
+
+默认开发节奏：
+
+- 优先在线修：
+  - runtime update
+  - live T4 验证
+  - APK reinstall
+  - WebUI / daemon / helper 小步验证
+- 不把 `image/img` 当作日常调试手段。
+- 只有用户明确说：
+  - `出包`
+  - `出 image`
+  - `出 img`
+  - `打镜像`
+  才生成新的 T4 rootfs `image/img`。
+
+如果某个问题确实必须通过新镜像解决，先说明：
+
+- 为什么在线修不够
+- 不出包会留下什么风险
+- 建议用户下达出包命令
+
+在用户确认前，不主动生成新的 `vN image`。
+
 ### 7.2 标准出包步骤
 
-1. 在 macOS 主机确认开发卷已挂载：
-   - `./scripts/mount-lumelodev-apfs.sh`
-2. 将当前仓库同步到 APFS 主工作区：
-   - `./scripts/sync-to-lumelodev-apfs.sh`
-   - 当前同步脚本会保留目标工作区中的 `out/` 与其他排除目录，避免出包后再次同步时把已生成制品误删
-3. 在 macOS 主机确定本轮输出文件名：
+1. 在 macOS 主机确认当前活跃工作区就是：
+   - `/Volumes/SeeDisk/Codex/Lumelo`
+2. 在 macOS 主机确定本轮输出文件名：
    - 例如 `out/t4-rootfs/lumelo-t4-rootfs-20260412-v12.img`
-4. 在 `OrbStack / lumelo-dev` 中以 `root` 运行制镜脚本，但显式保留调用用户上下文：
+3. 在 `OrbStack / lumelo-dev` 中以 `root` 运行制镜脚本，但显式保留调用用户上下文：
    - `SUDO_USER=see`
-5. 将所有重负载目录指到 Linux 原生目录，例如：
+4. 将所有重负载目录指到 Linux 原生目录，例如：
    - `TMPDIR=/var/tmp/lumelo-20260412-v12/tmp`
    - `LUMELO_BUILD_ROOT=/var/tmp/lumelo-20260412-v12/build-root`
    - `CARGO_TARGET_DIR=/var/tmp/lumelo-20260412-v12/cargo-target`
    - `GOCACHE=/var/tmp/lumelo-20260412-v12/go-cache`
-6. 在 `OrbStack` 内从 APFS 主工作区启动正式制镜：
+5. 在 `OrbStack` 内从当前 APFS 工作区启动正式制镜：
 
 ```sh
 orb -m lumelo-dev -u root /bin/sh -lc '
-  cd /Volumes/LumeloDev/Codex/Lumelo
+  cd /Volumes/SeeDisk/Codex/Lumelo
   export SUDO_USER=see
   export TMPDIR=/var/tmp/lumelo-YYYYMMDD-vN/tmp
   export LUMELO_BUILD_ROOT=/var/tmp/lumelo-YYYYMMDD-vN/build-root
@@ -252,29 +309,29 @@ orb -m lumelo-dev -u root /bin/sh -lc '
   export GOCACHE=/var/tmp/lumelo-YYYYMMDD-vN/go-cache
   ./scripts/build-t4-lumelo-rootfs-image.sh \
     --board-base-image /absolute/path/to/rk3399-base.img \
-    --output /Volumes/LumeloDev/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img
+    --output /Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img
 '
 ```
 
-7. 出图后立即做离线验收：
+6. 出图后立即做离线验收：
 
 ```sh
 orb -m lumelo-dev -u root /bin/sh -lc '
-  cd /Volumes/LumeloDev/Codex/Lumelo
+  cd /Volumes/SeeDisk/Codex/Lumelo
   ./scripts/verify-t4-lumelo-rootfs-image.sh \
-    /Volumes/LumeloDev/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img
+    /Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img
 '
 ```
 
-8. 若需要把制品同步回主仓库输出目录，再重新计算一次最终路径下的 `sha256`，避免校验文件还指向旧的 APFS 路径。
-9. 若本轮改动涉及 `NanoPC-T4` 无线链路，还要再跑一次官方金样对比：
+7. 若后续把制品移动到其他目录或上传前改了最终落点，再重新计算一次最终路径下的 `sha256`。
+8. 若本轮改动涉及 `NanoPC-T4` 无线链路，还要再跑一次官方金样对比：
 
 ```sh
 orb -m lumelo-dev -u root /bin/sh -lc '
-  cd /Volumes/LumeloDev/Codex/Lumelo
+  cd /Volumes/SeeDisk/Codex/Lumelo
   ./scripts/compare-t4-wireless-golden.sh \
     --board-base-image /absolute/path/to/rk3399-base.img.gz \
-    --image /Volumes/LumeloDev/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img
+    --image /Volumes/SeeDisk/Codex/Lumelo/out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img
 '
 ```
 
@@ -285,7 +342,7 @@ orb -m lumelo-dev -u root /bin/sh -lc '
 - `hciattach.rk`
 - `bcmdhd.conf`
   与官方底图一致
-10. 若本轮改动涉及：
+9. 若本轮改动涉及：
    - 蓝牙
    - Wi-Fi
    - SSH
@@ -294,7 +351,7 @@ orb -m lumelo-dev -u root /bin/sh -lc '
    - 板级启动链
    则烧录后必须继续执行：
    - [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
-11. 在 `T4_Bringup_Checklist.md` 未通过前，不对外宣布“这张图已可烧录验证蓝牙 / SSH / 配网”。
+10. 在 `T4_Bringup_Checklist.md` 未通过前，不对外宣布“这张图已可烧录验证蓝牙 / SSH / 配网”。
 
 ### 7.2.1 T4 无线链路固定金样
 
@@ -423,23 +480,29 @@ env LUMELO_T4_SSH_OPTIONS='-o StrictHostKeyChecking=accept-new -o UserKnownHosts
   - 固定处理：共享卷只保留源码和最终制品；编译缓存、临时工作区全部放 Linux 原生目录
 
 - 现象：Android 或其他构建链出现 `._*` 污染、副文件被当成输入
-  - 判断：源码目录还在 `SeeDisk/exFAT`
-  - 固定处理：先同步到 `/Volumes/LumeloDev/Codex/Lumelo` 再构建
+  - 判断：源码目录落在了非原生文件系统
+  - 这条在 `Lumelo` 里历史上对应过：
+    - `SeeDisk/exFAT`
+  - 固定处理：把活跃源码目录迁回 `APFS`
+  - 当前默认已是：
+    - `/Volumes/SeeDisk/Codex/Lumelo`
+  - 一般不再需要先同步到 `LumeloDev`
 
 - 现象：出图成功后再次执行同步，`LumeloDev/out/` 中的镜像或 APK 消失
-  - 判断：同步脚本误把排除目录也当成“应删除目标”
-  - 固定处理：同步脚本必须保留目标侧 `out/`；出包后若还要再次同步，只能使用不会删除排除目录的同步策略
+  - 判断：这是旧 `LumeloDev` 同步流的历史坑
+  - 固定处理：当前默认流程不再依赖这套同步链
+  - 只有回到旧 `LumeloDev` workaround 时，才需要额外注意它
 
 - 现象：`sha256` 文件内容还指向 `/Volumes/LumeloDev/...`
-  - 判断：制品移动过目录，但校验文件没重算
+  - 判断：这是旧路径时代留下的历史痕迹，或制品移动后没重算校验
   - 固定处理：在最终交付路径重新执行 `shasum -a 256 <final-img> > <final-img>.sha256`
 
 ### 7.4 出包前后检查清单
 
 - 出包前确认：
   - 当前 `vN` 序号
-  - APFS 开发卷已挂载
-  - 已同步到 `/Volumes/LumeloDev/Codex/Lumelo`
+  - 当前活跃工作区就是：
+    - `/Volumes/SeeDisk/Codex/Lumelo`
   - `OrbStack / lumelo-dev` 正常运行
   - 本轮临时目录全部位于 `/var/tmp/lumelo-<build-tag>/`
 

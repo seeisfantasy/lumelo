@@ -258,7 +258,6 @@ compare_file_hash /system/etc/firmware/nvram_ap6356.txt "official AP6356 NVRAM c
 
 expect_target_text /usr/libexec/lumelo/bluetooth-uart-attach "/sys/module/bcmdhd" "attach waits for bcmdhd"
 expect_target_text /usr/libexec/lumelo/bluetooth-uart-attach "/sys/class/rfkill/rfkill0/state" "attach toggles rfkill0 state"
-expect_target_text /usr/libexec/lumelo/bluetooth-uart-attach "rm -f /dev/rfkill" "attach clears stale rfkill node"
 expect_target_text /usr/libexec/lumelo/bluetooth-uart-attach "timeout 5 btmgmt info" "attach bounds btmgmt probe"
 expect_target_text /usr/libexec/lumelo/bluetooth-uart-attach "grep -Eq '^hci[0-9]+:'" "attach requires discovered hci controller"
 expect_target_text /usr/libexec/lumelo/bluetooth-uart-attach 'exec "${ATTACH_HELPER}" "${ATTACH_UART}" "${ATTACH_CHIPSET}" "${ATTACH_BAUD}"' "attach exec wiring"

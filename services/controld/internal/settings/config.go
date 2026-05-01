@@ -20,7 +20,7 @@ func Default() Config {
 	return Config{
 		Mode:          "local",
 		InterfaceMode: "ethernet",
-		DSDPolicy:     "strict_native",
+		DSDPolicy:     "native_dsd",
 		SSHEnabled:    false,
 		ConfigPath:    "/etc/lumelo/config.toml",
 	}

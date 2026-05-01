@@ -5,7 +5,7 @@ Name=en* eth*
 DHCP=yes
 LinkLocalAddressing=no
 LLMNR=no
-MulticastDNS=no
+MulticastDNS=yes
 
 [DHCPv4]
 RouteMetric=100

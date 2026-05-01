@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -702,10 +702,10 @@ fn collect_scan_result(scan_root: &Path, indexed_at: i64) -> Result<ScanResult, 
     )?;
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-    let mut grouped_files = BTreeMap::<String, Vec<FileScanRecord>>::new();
+    let mut grouped_files = BTreeMap::<(String, String), Vec<FileScanRecord>>::new();
     for file in files {
         grouped_files
-            .entry(file.album_root_dir_hint.clone())
+            .entry((file.album_root_dir_hint.clone(), file_grouping_key(&file)))
             .or_default()
             .push(file);
     }
@@ -718,7 +718,7 @@ fn collect_scan_result(scan_root: &Path, indexed_at: i64) -> Result<ScanResult, 
     let mut genre_names = BTreeSet::new();
     let mut search_entries = Vec::new();
 
-    for (album_root_dir_hint, mut group_files) in grouped_files {
+    for ((album_root_dir_hint, _), mut group_files) in grouped_files {
         group_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         let group_context =
             resolve_group_album_context(&group_files, &volume.label, &album_root_dir_hint);
@@ -977,6 +977,20 @@ fn resolve_track_record(
     }
 }
 
+fn file_grouping_key(file: &FileScanRecord) -> String {
+    if let Some(album_title) = clean_optional_text(file.metadata.album_title.as_deref()) {
+        let album_artist =
+            clean_optional_text(file.metadata.album_artist.as_deref()).unwrap_or_default();
+        return format!(
+            "tag:{}:{}",
+            normalize_text(&album_artist),
+            normalize_text(&album_title)
+        );
+    }
+
+    format!("fallback:{}", file.album_root_dir_hint)
+}
+
 fn build_track_search_content(file: &FileScanRecord, resolved: &ResolvedTrackRecord) -> String {
     let mut parts = vec![
         resolved.title.clone(),
@@ -992,14 +1006,14 @@ fn build_track_search_content(file: &FileScanRecord, resolved: &ResolvedTrackRec
     parts.join(" ")
 }
 
-fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
+fn parse_audio_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
     let probe = match Probe::open(path) {
         Ok(probe) => probe,
-        Err(_) => return ParsedAudioMetadata::default(),
+        Err(_) => return fallback_probe_metadata(path),
     };
     let tagged_file = match probe.read() {
         Ok(tagged_file) => tagged_file,
-        Err(_) => return ParsedAudioMetadata::default(),
+        Err(_) => return fallback_probe_metadata(path),
     };
 
     let primary_tag = tagged_file
@@ -1030,7 +1044,40 @@ fn parse_audio_metadata(path: &Path) -> ParsedAudioMetadata {
         }
     }
 
-    metadata
+    Some(metadata)
+}
+
+fn fallback_probe_metadata(path: &Path) -> Option<ParsedAudioMetadata> {
+    if !has_known_audio_header(path) {
+        return None;
+    }
+
+    Some(ParsedAudioMetadata::default())
+}
+
+fn has_known_audio_header(path: &Path) -> bool {
+    let extension = file_extension(path);
+    match extension.as_str() {
+        "wav" => file_header_matches(path, 0, b"RIFF") && file_header_matches(path, 8, b"WAVE"),
+        "dff" => file_header_matches(path, 0, b"FRM8"),
+        "dsf" | "dsd" => file_header_matches(path, 0, b"DSD "),
+        _ => false,
+    }
+}
+
+fn file_header_matches(path: &Path, offset: u64, expected: &[u8]) -> bool {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut prefix = vec![0u8; expected.len()];
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return false;
+    }
+    if file.read_exact(&mut prefix).is_err() {
+        return false;
+    }
+    prefix == expected
 }
 
 fn discover_directory_artwork(
@@ -1263,7 +1310,9 @@ fn collect_entries(
             .to_string();
         let parent_relative = parent_relative_path(&relative_path).unwrap_or_default();
         let (album_root_dir_hint, directory_disc_no) = album_root_and_disc_no(&parent_relative);
-        let parsed_metadata = parse_audio_metadata(&path);
+        let Some(parsed_metadata) = parse_audio_metadata(&path) else {
+            continue;
+        };
         files.push(FileScanRecord {
             relative_path,
             filename,
@@ -2217,9 +2266,9 @@ fn stable_id(input: &str) -> String {
 mod tests {
     use super::{
         build_volume_descriptor, discover_directory_artwork, ensure_schema, execute,
-        resolve_group_album_context, resolve_track_record, split_genres, table_count, Config,
-        FileScanRecord, MediaIndexCommand, ParsedAudioMetadata, VolumeDescriptor,
-        DEFAULT_LIBRARY_DB_PATH, UNKNOWN_ARTIST,
+        fallback_probe_metadata, file_grouping_key, resolve_group_album_context,
+        resolve_track_record, split_genres, table_count, Config, FileScanRecord, MediaIndexCommand,
+        ParsedAudioMetadata, VolumeDescriptor, DEFAULT_LIBRARY_DB_PATH, UNKNOWN_ARTIST,
     };
     use image::{ImageReader, Rgb, RgbImage};
     use rusqlite::{Connection, OptionalExtension};
@@ -2269,9 +2318,9 @@ mod tests {
         let cache_dir = temp_dir("scan-artwork");
         let root = temp_dir("scan-root");
 
-        touch(&root.join("Album One/01 - Opening.flac"));
-        touch(&root.join("Album One/02_Afterglow.mp3"));
-        touch(&root.join("Album Two/Disc 2/07 - Finale.wav"));
+        write_test_wav(&root.join("Album One/01 - Opening.wav"), 44_100, 250);
+        write_test_wav(&root.join("Album One/02_Afterglow.wav"), 44_100, 250);
+        write_test_wav(&root.join("Album Two/Disc 2/07 - Finale.wav"), 48_000, 250);
         touch(&root.join("notes.txt"));
 
         let summary = execute(Config {
@@ -2320,8 +2369,8 @@ mod tests {
         let cache_dir = temp_dir("rescan-artwork");
         let root = temp_dir("rescan-root");
 
-        touch(&root.join("Album/01 - First.flac"));
-        touch(&root.join("Album/02 - Second.flac"));
+        write_test_wav(&root.join("Album/01 - First.wav"), 44_100, 250);
+        write_test_wav(&root.join("Album/02 - Second.wav"), 44_100, 250);
 
         execute(Config {
             command: MediaIndexCommand::ScanDir {
@@ -2332,7 +2381,7 @@ mod tests {
         })
         .unwrap();
 
-        fs::remove_file(root.join("Album/02 - Second.flac")).unwrap();
+        fs::remove_file(root.join("Album/02 - Second.wav")).unwrap();
 
         let summary = execute(Config {
             command: MediaIndexCommand::ScanDir { scan_root: root },
@@ -2357,7 +2406,7 @@ mod tests {
         let cache_dir = temp_dir("cover-artwork");
         let root = temp_dir("cover-root");
 
-        touch(&root.join("Album With Cover/01 - Opening.flac"));
+        write_test_wav(&root.join("Album With Cover/01 - Opening.wav"), 44_100, 250);
         write_test_jpeg(
             &root.join("Album With Cover/folder.jpg"),
             640,
@@ -2423,7 +2472,7 @@ mod tests {
         let cache_dir = temp_dir("cover-priority-artwork");
         let root = temp_dir("cover-priority-root");
 
-        touch(&root.join("Priority Album/01 - Opening.flac"));
+        write_test_wav(&root.join("Priority Album/01 - Opening.wav"), 44_100, 250);
         write_test_jpeg(
             &root.join("Priority Album/folder.jpg"),
             500,
@@ -2470,6 +2519,44 @@ mod tests {
             "Priority Album/folder.jpg"
         );
         assert_eq!(chosen_ref, expected_artwork.content_hash);
+
+        cleanup_db_files(&db_path);
+        cleanup_dir(&cache_dir);
+        cleanup_dir(&root);
+    }
+
+    #[test]
+    fn scan_dir_skips_unreadable_audio_files() {
+        let db_path = temp_path("library-scan-bad-media", "db");
+        let cache_dir = temp_dir("scan-bad-media-artwork");
+        let root = temp_dir("scan-bad-media-root");
+
+        touch(&root.join("Broken Album/01 - Broken.mp3"));
+        touch(&root.join("Broken Album/02 - Broken.flac"));
+        touch(&root.join("Broken Album/03 - Broken.ogg"));
+        write_test_wav(&root.join("Broken Album/04 - Valid.wav"), 44_100, 250);
+
+        let summary = execute(Config {
+            command: MediaIndexCommand::ScanDir {
+                scan_root: root.clone(),
+            },
+            db_path: db_path.clone(),
+            artwork_cache_dir: cache_dir.clone(),
+        })
+        .unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        let relative_paths = string_rows(
+            &connection,
+            "SELECT relative_path FROM tracks ORDER BY relative_path ASC",
+        );
+
+        assert_eq!(summary.album_count, 1);
+        assert_eq!(summary.track_count, 1);
+        assert_eq!(
+            relative_paths,
+            vec!["Broken Album/04 - Valid.wav".to_string()]
+        );
 
         cleanup_db_files(&db_path);
         cleanup_dir(&cache_dir);
@@ -2543,6 +2630,57 @@ mod tests {
     }
 
     #[test]
+    fn file_grouping_key_splits_mixed_folder_by_tagged_album_identity() {
+        let first = file_record(
+            "Mixed Folder/01 - Song A.flac",
+            "Mixed Folder",
+            ParsedAudioMetadata {
+                album_title: Some("Album A".to_string()),
+                artist: Some("Artist A".to_string()),
+                ..ParsedAudioMetadata::default()
+            },
+        );
+        let second = file_record(
+            "Mixed Folder/02 - Song B.flac",
+            "Mixed Folder",
+            ParsedAudioMetadata {
+                album_title: Some("Album B".to_string()),
+                artist: Some("Artist B".to_string()),
+                ..ParsedAudioMetadata::default()
+            },
+        );
+        let fallback = file_record(
+            "Mixed Folder/03 - Untagged.flac",
+            "Mixed Folder",
+            ParsedAudioMetadata::default(),
+        );
+
+        assert_ne!(file_grouping_key(&first), file_grouping_key(&second));
+        assert_ne!(file_grouping_key(&first), file_grouping_key(&fallback));
+        assert!(file_grouping_key(&fallback).starts_with("fallback:"));
+    }
+
+    #[test]
+    fn fallback_probe_metadata_accepts_known_dsd_and_wav_headers() {
+        let wav = temp_path("header-fallback-wav", "wav");
+        write_test_wav(&wav, 44_100, 250);
+
+        let dff = temp_path("header-fallback-dff", "dff");
+        fs::write(&dff, b"FRM8\x00\x00\x00\x00DSD ").unwrap();
+
+        let bogus = temp_path("header-fallback-bogus", "flac");
+        fs::write(&bogus, b"lumelo").unwrap();
+
+        assert!(fallback_probe_metadata(&wav).is_some());
+        assert!(fallback_probe_metadata(&dff).is_some());
+        assert!(fallback_probe_metadata(&bogus).is_none());
+
+        let _ = fs::remove_file(wav);
+        let _ = fs::remove_file(dff);
+        let _ = fs::remove_file(bogus);
+    }
+
+    #[test]
     fn split_genres_breaks_simple_multi_value_strings() {
         assert_eq!(
             split_genres("Ambient; Electronic / Drone"),
@@ -2607,6 +2745,39 @@ mod tests {
 
         let image = RgbImage::from_pixel(width, height, Rgb(rgb));
         image.save(path).unwrap();
+    }
+
+    fn write_test_wav(path: &Path, sample_rate: u32, duration_ms: u32) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+
+        let channel_count = 1u16;
+        let bits_per_sample = 16u16;
+        let bytes_per_sample = u32::from(bits_per_sample / 8);
+        let frame_count = ((u64::from(sample_rate) * u64::from(duration_ms)) / 1000).max(1) as u32;
+        let data_len = frame_count * u32::from(channel_count) * bytes_per_sample;
+        let byte_rate = sample_rate * u32::from(channel_count) * bytes_per_sample;
+        let block_align = channel_count * (bits_per_sample / 8);
+        let riff_chunk_size = 36 + data_len;
+
+        let mut bytes = Vec::with_capacity((44 + data_len) as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&riff_chunk_size.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channel_count.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize((44 + data_len) as usize, 0);
+
+        fs::write(path, bytes).unwrap();
     }
 
     fn demo_volume() -> VolumeDescriptor {

@@ -5,8 +5,16 @@
 - 新窗口进入状态：
   - 先看 [AI_Handoff_Memory.md](/Volumes/SeeDisk/Codex/Lumelo/docs/AI_Handoff_Memory.md)
   - 再看 [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)
+- 里程碑版本规划、需求池和 bug 池：
+  - 看 [Milestone_Progress_Document.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Milestone_Progress_Document.md)
 - 环境、出包、在线更新：
   - 看 [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
+  - 当前测试镜像默认 SSH 登录信息也维护在 [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
+- WebUI 重构与稳定 API contract：
+  - 看 [WebUI_API_Contract_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_API_Contract_Plan.md)
+  - 看 [WebUI_Design_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_Design_Plan.md)
+  - 若继续接手 2026-04-19 这轮 live T4 WebUI 部署和后续 `player-first` 纠偏：
+    - 看 [Handoff_20260419_WebUI_Player_First.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Handoff_20260419_WebUI_Player_First.md)
 - 手机 APK、经典蓝牙配网、协议与安全传输：
   - 看 [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)
   - 看 [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
@@ -24,11 +32,21 @@
 - [AI_Handoff_Memory.md](/Volumes/SeeDisk/Codex/Lumelo/docs/AI_Handoff_Memory.md)
   - 当前交接入口、最新进展、未闭环事项
 - [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md)
-  - 产品原则、长期边界、升级维护原则
+  - 产品原则、长期边界、状态机、API / 服务 contract、验收矩阵
 - [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)
   - 时间线开发日志
+- [Milestone_Progress_Document.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Milestone_Progress_Document.md)
+  - 版本规划、M1/M2/M3 开发大纲、需求池与 bug 池
 - [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
   - 开发环境、出包、在线更新与操作约定
+- [WebUI_API_Contract_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_API_Contract_Plan.md)
+  - WebUI / API 解耦计划与阶段边界
+- [WebUI_Design_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_Design_Plan.md)
+  - WebUI 视觉方向、信息架构与当前重构范围
+- [Audio_Output_Device_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Audio_Output_Device_Plan.md)
+  - 解码器 / DAC 展示、后续多输出选择与 USB 事件监听计划
+- [Handoff_20260419_WebUI_Player_First.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Handoff_20260419_WebUI_Player_First.md)
+  - 2026-04-19 这轮 WebUI / live T4 部署的 session handoff
 - [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)
   - 手机 APK 当前状态、结构、验收重点与后续计划
 - [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)

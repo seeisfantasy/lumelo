@@ -2,12 +2,14 @@
 Description=Lumelo Bluetooth Provisioning Mode
 After=bluetooth.service dbus.service
 Requires=bluetooth.service
+PartOf=lumelo-wifi-provisiond.service
 ConditionPathExists=/usr/bin/bluetoothctl
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/lumelo-bluetooth-provisioning-mode
+ExecStop=/usr/bin/lumelo-bluetooth-provisioning-mode disable
 
 [Install]
 WantedBy=multi-user.target

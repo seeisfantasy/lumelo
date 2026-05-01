@@ -2,11 +2,13 @@
 Description=Lumelo Bluetooth Wi-Fi Provisioning Service
 After=bluetooth.service dbus.service lumelo-bluetooth-provisioning.service
 Requires=bluetooth.service
+BindsTo=lumelo-bluetooth-provisioning.service
 ConditionPathExists=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond
 
 [Service]
 Type=simple
 ExecStart=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond
+ExecStopPost=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond --cleanup-sdp
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=lumelo

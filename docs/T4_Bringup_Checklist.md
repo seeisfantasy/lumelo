@@ -105,11 +105,14 @@
 
 先确认：
 
-- `http://<T4_IP>:18080/` 可打开
-- `http://<T4_IP>:18080/healthz` 可返回
-- `http://<T4_IP>:18080/provisioning-status` 可返回
-- `http://<T4_IP>:18080/logs.txt` 可返回
+- `http://<T4_IP>/` 可打开
+- `http://<T4_IP>/healthz` 可返回
+- `http://<T4_IP>/provisioning-status` 可返回
+- `http://<T4_IP>/logs.txt` 可返回
+- `http://lumelo.local/` 在支持 mDNS 的同一局域网客户端上可打开
+- `_http._tcp` mDNS service 发布 `lumelo.local:80`
 - `ssh root@<T4_IP>` 可登录
+  当前开发 / 测试镜像默认登录信息见 [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
 
 如果这里任何一项失败，不要先假定是手机或 APK 问题。
 
@@ -122,6 +125,7 @@ systemctl --no-pager --full status \
   ssh.service \
   lumelo-ssh-hostkeys.service \
   lumelo-bluetooth-uart-attach.service \
+  lumelo-bluetooth-provisioning.service \
   bluetooth.service \
   lumelo-wifi-provisiond.service
 ```
@@ -153,12 +157,12 @@ hcitool scan
 注意：
 
 - 这一步是“控制器最小存活测试”
-- 它不能替代 BLE 配网验证
+- 它不能替代经典蓝牙 `RFCOMM / SPP` provisioning 主链验证
 - 但如果连这一步都过不了，就不该先怀疑手机 APK
 
-### 6.4 第四层：BLE 配网链核查
+### 6.4 第四层：经典蓝牙 provisioning 主链核查
 
-再看 BLE 配网链本身：
+再看当前真正的 provisioning 主链：
 
 - `/healthz` 中 `provisioning_available` 应为 `true`
 - `provisioning_state` 不应长期卡在明显异常状态
@@ -168,9 +172,12 @@ hcitool scan
   - `Direct firmware load ... failed`
   - `no hostkeys available`
 - 手机端应至少能在：
-  - `BLE TEST SCAN`
-  - 或 Lumelo 专用扫描
-  中看到设备
+  - 系统蓝牙设置页
+  - 或 APK 的 `Lumelo Scan`
+  中看到 `Lumelo T4`
+- `Raw BLE Scan`
+  - 现在只作为诊断项
+  - 看不到 BLE 广播本身，不再单独等于“主配网失败”
 
 ### 6.5 第五层：Wi-Fi 与 WebUI 闭环
 
@@ -196,7 +203,7 @@ lumelo-media-smoke play --first-wav
 - `smoke --skip-play` 应能生成 demo `WAV` 并让 `media-indexd` 成功写入 `library.db`
 - `list --first-wav` 应至少返回一条可解析的真实轨道
 - `play --first-wav` 应调用 `aplay -D default` 并正常退出
-- `http://<T4_IP>:18080/library` 应能看到真实条目，而不是全 `0`
+- `http://<T4_IP>/library` 应能看到真实条目，而不是全 `0`
 
 注意：
 
@@ -290,8 +297,8 @@ lumelo-media-smoke regress-library-scan
 若这轮还要从 WebUI 再看一眼，执行：
 
 ```sh
-curl -fsSL http://192.168.1.121:18080/library | rg "library-cover-art|Album Alpha|Album Beta"
-curl -I http://192.168.1.121:18080/artwork/thumb/320/<hash>.jpg
+curl -fsSL http://192.168.1.121/library | rg "library-cover-art|Album Alpha|Album Beta"
+curl -I http://192.168.1.121/artwork/thumb/320/<hash>.jpg
 ```
 
 判定方式：
@@ -439,19 +446,23 @@ lumelo-media-smoke regress-bad-media --timeout 8
 - `bluetoothctl show` 里仍是 `Discoverable: no`
   - 优先怀疑适配器状态没有真正切到可发现
 
+- App 的 `Lumelo Scan`、或系统蓝牙设置页都看不到 `Lumelo T4`
+  - 优先怀疑 classic Bluetooth discoverable / pairable 主链没真正起来
+
 - App 的 `BLE TEST SCAN` 能看到很多别的设备，但看不到 `Lumelo T4`
-  - 优先怀疑 T4 板端广播没真正发出来
+  - 这条现在只说明：
+    - Raw BLE 诊断广播没真正发出来
+  - 不能单独替代 classic 主链判断
 
-## 8. 与经典蓝牙测试的关系
+## 8. 与 Raw BLE 诊断的关系
 
-经典蓝牙测试有价值，但角色要限定清楚：
+当前角色要限定清楚的是：
 
-- 它适合做“控制器活没活”的快速 smoke test
-- 它不等于 BLE 广播一定正常
-- 它也不等于 GATT 配网链一定正常
+- 经典蓝牙发现 / 连接是当前 provisioning 主链
+- `Raw BLE Scan` 只保留为诊断项
+- `Raw BLE Scan` 看不到目标广播，不再自动等于“APK 主流程失败”
 
-所以后续如果加“经典蓝牙可发现”诊断模式，它应该作为：
+因此当前 bring-up 判断顺序应是：
 
-- 辅助诊断项
-
-而不是替代当前的 BLE 配网路径。
+- 先看 classic Bluetooth 主链是否可发现、可连接、可拿到 `device_info`
+- 再把 `Raw BLE Scan` 当成“板端是否仍在发 BLE 诊断广播”的辅助证据

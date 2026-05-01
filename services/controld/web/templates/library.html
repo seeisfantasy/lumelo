@@ -1,179 +1,1537 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Lumelo library</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    <title>Lumelo 曲库</title>
+    {{if .InlineCSS}}<style>{{.InlineCSS}}</style>{{else}}<link rel="stylesheet" href="/static/css/app.css">{{end}}
   </head>
-  <body>
-    <main class="shell">
+  <body class="app-body with-player-dock page-library">
+    <main class="shell shell-library">
       <nav class="topnav">
-        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
-        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
-        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
-        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+        <div class="topnav-brand">
+          <p class="eyebrow">Lumelo</p>
+          <p class="topnav-title">Lumelo</p>
+          <p class="topnav-copy">
+            先按专辑浏览，再深入到文件夹和轨道，保持播放视角而不是文件管理器视角。
+          </p>
+        </div>
+        <div class="topnav-links">
+          <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">首页</a>
+          <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">曲库</a>
+          <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">设置</a>
+          <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">日志</a>
+        </div>
       </nav>
 
-      <section class="card">
-        <p class="eyebrow">Lumelo V1</p>
-        <h1>Library overview</h1>
+      <section class="card page-hero page-main">
+        <p class="eyebrow">曲库</p>
+        <h1>先看专辑，再选歌曲</h1>
         <p class="summary">
-          This page reads the current SQLite library state directly from
-          <code>library.db</code> and is intended to validate the current index
-          layer and media boundaries.
+          曲库页保持 album-first：专辑封面、当前上下文和曲目列表在同一视图里完成，不把首页式诊断信息抢到前面。
+        </p>
+        <p class="summary" id="library-live-status">
+          这页保留 SSR first paint，并继续通过稳定的 <code>/api/v1/...</code> 刷新浏览状态和播放状态。
         </p>
       </section>
 
-      <section class="card">
-        <h2>Playback Boundary</h2>
-        <p class="summary">
-          New TF or USB media can be mounted while you listen, but full scan
-          remains blocked during playback. Stop playback first, then trigger the
-          next manual scan.
-        </p>
-        <dl class="grid">
+      <section class="card page-main library-focus">
+        <div class="section-header">
           <div>
-            <dt>Playback state</dt>
-            <dd>{{if .PlaybackStatus.State}}{{.PlaybackStatus.State}}{{else}}unknown{{end}}</dd>
+            <p class="eyebrow">当前上下文</p>
+            <h2>浏览焦点</h2>
           </div>
-          <div>
-            <dt>Current track</dt>
-            <dd>{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}-{{end}}</dd>
-          </div>
-        </dl>
-        {{if .PlaybackScanBlock}}
-          <p class="banner banner-warn">
-            Playback Quiet Mode is active. If you just inserted new media, do
-            not expect new albums to appear yet. Stop playback, then run the
-            next manual scan.
+          <p class="summary section-summary">
+            让当前专辑或文件夹一眼可见，避免整页退回成纯 browse tool。
           </p>
-        {{else}}
-          <p class="summary">
-            Playback is not currently blocking scan. New media still requires a
-            manual scan before album results become complete.
-          </p>
-        {{end}}
-      </section>
-
-      <section class="card">
-        <h2>Library Status</h2>
-        <p class="status-line">
-          Database:
-          {{if .LibrarySnapshot.Available}}
-            <span class="pill pill-ok">online</span>
+        </div>
+        <div class="focus-chip-row">
+          <span class="focus-chip" id="library-focus-mode">{{if .SelectedAlbumUID}}专辑视图{{else if .SelectedDirectoryVolumeUUID}}文件夹视图{{else}}完整曲库{{end}}</span>
+          <span class="focus-chip" id="library-focus-selection">{{if .SelectedAlbumUID}}{{.SelectedAlbumTitle}}{{else if .SelectedDirectoryVolumeUUID}}{{.SelectedDirectoryTitle}}{{else}}专辑墙已就绪{{end}}</span>
+          <span class="focus-chip" id="library-focus-density">{{.LibrarySnapshot.Stats.AlbumCount}} 张专辑 · {{.LibrarySnapshot.Stats.TrackCount}} 首歌曲</span>
+        </div>
+        <p class="focus-title" id="library-focus-title">{{if .SelectedAlbumUID}}{{.SelectedAlbumTitle}}{{else if .SelectedDirectoryVolumeUUID}}{{.SelectedDirectoryTitle}}{{else}}专辑优先的本地浏览{{end}}</p>
+        <p class="summary" id="library-focus-meta">
+          {{if .SelectedAlbumUID}}
+            当前按专辑自然顺序浏览，`播放` 会继续沿用这个专辑上下文。
+          {{else if .SelectedDirectoryVolumeUUID}}
+            当前打开的是文件夹上下文，同时下面仍保留专辑浏览入口。
           {{else}}
-            <span class="pill pill-offline">offline</span>
+            默认先看所有专辑，只有在需要精确路径控制时再下探到文件夹。
           {{end}}
         </p>
-        <dl class="grid">
-          <div>
-            <dt>Library database</dt>
-            <dd>{{.LibraryDBPath}}</dd>
-          </div>
-          <div>
-            <dt>Volumes</dt>
-            <dd>{{.LibrarySnapshot.Stats.VolumeCount}}</dd>
-          </div>
-          <div>
-            <dt>Albums</dt>
-            <dd>{{.LibrarySnapshot.Stats.AlbumCount}}</dd>
-          </div>
-          <div>
-            <dt>Tracks</dt>
-            <dd>{{.LibrarySnapshot.Stats.TrackCount}}</dd>
-          </div>
-          <div>
-            <dt>Artists</dt>
-            <dd>{{.LibrarySnapshot.Stats.ArtistCount}}</dd>
-          </div>
-          <div>
-            <dt>Genres</dt>
-            <dd>{{.LibrarySnapshot.Stats.GenreCount}}</dd>
-          </div>
-        </dl>
-        {{if .LibrarySnapshot.Error}}
-          <p class="summary">Last library query error: {{.LibrarySnapshot.Error}}</p>
-        {{end}}
+        <div class="actions hero-actions">
+          <a href="/library" class="button-link button-link-secondary" id="library-focus-reset" {{if not (or .SelectedAlbumUID .SelectedDirectoryVolumeUUID)}}hidden{{end}}>重置浏览</a>
+        </div>
       </section>
 
-      <section class="card">
-        <h2>Volumes</h2>
+      <section class="card page-rail">
+        <h2>播放摘要</h2>
+        <p class="banner banner-ok" id="library-command-message" {{if not .CommandMessage}}hidden{{end}}>
+          <span id="library-command-message-value">{{.CommandMessage}}</span>
+        </p>
+        <p class="banner banner-error" id="library-command-error" {{if not .CommandError}}hidden{{end}}>
+          <span id="library-command-error-value">{{.CommandError}}</span>
+        </p>
+        <p class="summary">
+          播放时可以挂载新的 TF 或 USB 介质，但完整扫描仍会被阻止。先停止播放，再触发下一次手动扫描。
+        </p>
+        <dl class="grid">
+          <div>
+            <dt>播放状态</dt>
+            <dd id="library-playback-state">{{playbackStateLabel .PlaybackStatus.State}}</dd>
+          </div>
+          <div>
+            <dt>当前曲目</dt>
+            <dd id="library-current-track">{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}-{{end}}</dd>
+          </div>
+        </dl>
+        <div id="library-now-playing" class="now-playing {{if eq .PlaybackStatus.State "quiet_active"}}now-playing-active{{end}}" {{if not .NowPlaying.TrackUID}}hidden{{end}}>
+            <p class="now-playing-label">正在播放</p>
+            <p class="now-playing-title" id="library-now-playing-title">
+              <span id="library-now-playing-title-text">{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else}}{{.NowPlaying.TrackUID}}{{end}}</span>
+              <span id="library-now-playing-pill">
+                {{if .NowPlaying.TrackUID}}
+                  {{if eq .PlaybackStatus.State "quiet_active"}}
+                    <span class="pill pill-playing">播放中</span>
+                  {{else}}
+                    <span class="pill pill-current">{{playbackStateLabel .PlaybackStatus.State}}</span>
+                  {{end}}
+                {{end}}
+              </span>
+            </p>
+            <p class="now-playing-meta" id="library-now-playing-artist" {{if not .NowPlaying.Artist}}hidden{{end}}>{{.NowPlaying.Artist}}</p>
+            <p class="now-playing-meta" id="library-now-playing-path" {{if not .NowPlaying.RelativePath}}hidden{{end}}>{{.NowPlaying.RelativePath}}</p>
+            <form method="post" action="/library/commands" class="actions library-playback-actions" id="library-now-playing-actions">
+              {{if $.SelectedAlbumUID}}
+                <input type="hidden" name="album_uid" value="{{$.SelectedAlbumUID}}">
+              {{end}}
+              {{if $.SelectedDirectoryVolumeUUID}}
+                <input type="hidden" name="volume_uuid" value="{{$.SelectedDirectoryVolumeUUID}}">
+                {{if $.SelectedDirectoryPath}}
+                  <input type="hidden" name="directory" value="{{$.SelectedDirectoryPath}}">
+                {{end}}
+              {{end}}
+              <input type="hidden" name="track_id" value="{{.NowPlaying.TrackUID}}" data-library-transport-track-id>
+              <button type="submit" name="action" value="{{transportPrimaryAction .PlaybackStatus.State}}" data-library-transport-primary>{{transportPrimaryLabel .PlaybackStatus.State}}</button>
+              <button type="submit" name="action" value="stop">停止</button>
+            </form>
+        </div>
+        <p class="banner banner-warn" id="library-scan-block-banner" {{if not .PlaybackScanBlock}}hidden{{end}}>
+            Playback Quiet Mode 正在生效。若你刚插入新介质，新的专辑暂时不会出现。先停止播放，再执行下一次手动扫描。
+        </p>
+        <p class="summary" id="library-scan-block-summary" {{if .PlaybackScanBlock}}hidden{{end}}>
+            当前播放不会阻止扫描，但新介质仍需要一次手动扫描后才会完整进入专辑结果。
+        </p>
+      </section>
+
+      <section class="card page-rail">
+        <h2>曲库摘要</h2>
+        <p class="status-line">
+          数据库：
+          <span id="library-db-pill" class="pill {{if .LibrarySnapshot.Available}}pill-ok{{else}}pill-offline{{end}}">
+            {{if .LibrarySnapshot.Available}}在线{{else}}离线{{end}}
+          </span>
+        </p>
+        <dl class="grid">
+          <div>
+            <dt>曲库数据库</dt>
+            <dd id="library-db-path">{{.LibraryDBPath}}</dd>
+          </div>
+          <div>
+            <dt>存储设备</dt>
+            <dd id="library-volume-count">{{.LibrarySnapshot.Stats.VolumeCount}}</dd>
+          </div>
+          <div>
+            <dt>专辑</dt>
+            <dd id="library-album-count">{{.LibrarySnapshot.Stats.AlbumCount}}</dd>
+          </div>
+          <div>
+            <dt>歌曲</dt>
+            <dd id="library-track-count">{{.LibrarySnapshot.Stats.TrackCount}}</dd>
+          </div>
+          <div>
+            <dt>艺人</dt>
+            <dd id="library-artist-count">{{.LibrarySnapshot.Stats.ArtistCount}}</dd>
+          </div>
+          <div>
+            <dt>流派</dt>
+            <dd id="library-genre-count">{{.LibrarySnapshot.Stats.GenreCount}}</dd>
+          </div>
+        </dl>
+        <p class="summary" id="library-query-error" {{if not .LibrarySnapshot.Error}}hidden{{end}}>
+          曲库查询失败：<span id="library-query-error-value">{{.LibrarySnapshot.Error}}</span>
+        </p>
+      </section>
+
+      <section class="card page-main library-secondary">
+        <h2>存储设备</h2>
         {{if .VolumeEntries}}
-          <div class="library-list">
+          <div class="library-list" id="library-volumes-list">
             {{range .VolumeEntries}}
               <article class="library-item">
                 <p class="library-title">
                   {{.Label}}
                   {{if .IsAvailable}}
-                    <span class="pill pill-ok">mounted</span>
+                    <span class="pill pill-ok">已挂载</span>
                   {{else}}
-                    <span class="pill pill-offline">missing</span>
+                    <span class="pill pill-offline">缺失</span>
                   {{end}}
                 </p>
                 <p class="library-meta">uuid {{.VolumeUUID}}</p>
                 <p class="library-meta">{{.MountPath}}</p>
-                <p class="library-meta">last seen {{.LastSeenAt}}</p>
+                <p class="library-meta">最近出现 {{.LastSeenAt}}</p>
+                <p class="library-meta"><a href="{{.BrowsePath}}" class="inline-link">浏览文件夹</a></p>
               </article>
             {{end}}
           </div>
+          <p class="summary" id="library-volumes-empty" hidden>还没有索引到存储设备。</p>
         {{else if .LibrarySnapshot.Available}}
-          <p class="summary">No indexed volumes yet.</p>
+          <div class="library-list" id="library-volumes-list" hidden></div>
+          <p class="summary" id="library-volumes-empty">还没有索引到存储设备。</p>
         {{else}}
-          <p class="summary">Library database is unavailable.</p>
+          <div class="library-list" id="library-volumes-list" hidden></div>
+          <p class="summary" id="library-volumes-empty">曲库数据库暂时不可用。</p>
         {{end}}
       </section>
 
-      <section class="card">
-        <h2>Albums</h2>
+      <section class="card page-main library-secondary">
+        <h2>文件夹</h2>
+        {{if .SelectedDirectoryVolumeUUID}}
+          <p class="banner banner-ok" id="library-folders-context">
+            当前文件夹：{{.SelectedDirectoryTitle}}
+            {{if .SelectedDirectoryPath}}
+              <a href="{{.ParentDirectoryBrowsePath}}" class="inline-link">返回上一级</a>
+            {{else}}
+              <a href="/library" class="inline-link">退出文件夹视图</a>
+            {{end}}
+          </p>
+        {{else}}
+          <p class="summary" id="library-folders-context">
+            只有在需要精确路径时，再从上面的存储设备进入文件夹浏览。
+          </p>
+        {{end}}
+        {{if .DirectoryEntries}}
+          <div class="library-list" id="library-directories-list">
+            {{range .DirectoryEntries}}
+              <article class="library-item {{if .IsSelected}}library-item-current{{end}}">
+                <p class="library-title">
+                  <a href="{{.BrowsePath}}" class="inline-link">{{.DisplayName}}</a>
+                  {{if .IsSelected}}
+                    <span class="pill pill-current">已打开</span>
+                  {{end}}
+                </p>
+                <p class="library-meta">{{.RelativePath}}</p>
+              </article>
+            {{end}}
+          </div>
+          <p class="summary" id="library-directories-empty" hidden>这个文件夹下没有索引到子目录。</p>
+        {{else if .SelectedDirectoryVolumeUUID}}
+          <div class="library-list" id="library-directories-list" hidden></div>
+          <p class="summary" id="library-directories-empty">这个文件夹下没有索引到子目录。</p>
+        {{else}}
+          <div class="library-list" id="library-directories-list" hidden></div>
+          <p class="summary" id="library-directories-empty">选择一个存储设备后，文件夹浏览才会启用。</p>
+        {{end}}
+      </section>
+
+      <section class="card page-main library-primary-albums">
+        <h2>最近专辑</h2>
+        {{if .SelectedAlbumUID}}
+          <p class="banner banner-ok" id="library-albums-context">
+            当前专辑：{{.SelectedAlbumTitle}}
+            <a href="/library" class="inline-link">显示全部曲目</a>
+          </p>
+        {{else}}
+          <p class="summary" id="library-albums-context">
+            点击任意专辑名，就能在下面看到这个专辑的完整曲目顺序。
+          </p>
+        {{end}}
         {{if .AlbumEntries}}
-          <div class="library-list">
+          <div class="library-list" id="library-albums-list">
             {{range .AlbumEntries}}
-              <article class="library-item">
-                {{if .CoverThumbPath}}
-                  <a href="{{.CoverThumbPath}}" class="library-cover-link" target="_blank" rel="noreferrer">
-                    <img src="{{.CoverThumbPath}}" alt="{{.Title}} cover" class="library-cover-art">
-                  </a>
-                {{end}}
-                <p class="library-title">{{.Title}}</p>
-                <p class="library-meta">{{.AlbumArtist}} · {{.YearLabel}} · {{.TrackCount}} tracks · {{.DurationLabel}}</p>
-                <p class="library-meta">{{.RootDirHint}}</p>
-                <p class="library-meta">
-                  thumb
+              <article class="library-item {{if .IsSelected}}library-item-current{{end}}">
+                <a href="{{.BrowsePath}}" class="library-cover-link">
                   {{if .CoverThumbPath}}
-                    <a href="{{.CoverThumbPath}}" target="_blank" rel="noreferrer">{{.CoverThumbLabel}}</a>
+                    <img src="{{.CoverThumbPath}}" alt="{{.Title}} cover" class="library-cover-art">
                   {{else}}
-                    {{.CoverThumbLabel}}
+                    <span class="library-cover-art library-cover-placeholder">{{.Title}}</span>
+                  {{end}}
+                </a>
+                <p class="library-title">
+                  <a href="{{.BrowsePath}}" class="inline-link">{{.Title}}</a>
+                  {{if .IsSelected}}
+                    <span class="pill pill-current">已打开</span>
+                  {{end}}
+                </p>
+                <p class="library-meta">{{.AlbumArtist}} · {{.YearLabel}} · {{.TrackCount}} 首 · {{.DurationLabel}}</p>
+                <p class="library-meta">{{.RootDirHint}}</p>
+                <p class="library-meta library-artwork-state">
+                  {{if .CoverThumbPath}}
+                    <a href="{{.CoverThumbPath}}" target="_blank" rel="noreferrer">查看封面</a>
+                  {{else}}
+                    暂无封面
                   {{end}}
                 </p>
               </article>
             {{end}}
           </div>
+          <div class="library-empty-state" id="library-albums-empty-state" hidden>
+            <div class="library-empty-shelf" aria-hidden="true">
+              <div class="library-empty-cover library-empty-cover-sun">晚霞专辑</div>
+              <div class="library-empty-cover library-empty-cover-pearl">晨雾合集</div>
+              <div class="library-empty-cover library-empty-cover-moon">夜航录音</div>
+            </div>
+            <p class="summary" id="library-albums-empty" hidden>还没有索引到专辑。</p>
+            <p class="summary library-empty-meta" id="library-albums-empty-meta">插入 TF 或 USB 并完成扫描后，最近专辑会先出现在这里。</p>
+          </div>
         {{else if .LibrarySnapshot.Available}}
-          <p class="summary">No indexed albums yet.</p>
+          <div class="library-list" id="library-albums-list" hidden></div>
+          <div class="library-empty-state" id="library-albums-empty-state">
+            <div class="library-empty-shelf" aria-hidden="true">
+              <div class="library-empty-cover library-empty-cover-sun">晚霞专辑</div>
+              <div class="library-empty-cover library-empty-cover-pearl">晨雾合集</div>
+              <div class="library-empty-cover library-empty-cover-moon">夜航录音</div>
+            </div>
+            <p class="summary" id="library-albums-empty">还没有索引到专辑。</p>
+            <p class="summary library-empty-meta" id="library-albums-empty-meta">插入 TF 或 USB 并完成扫描后，最近专辑会先出现在这里。</p>
+          </div>
         {{else}}
-          <p class="summary">Library database is unavailable.</p>
+          <div class="library-list" id="library-albums-list" hidden></div>
+          <div class="library-empty-state" id="library-albums-empty-state">
+            <div class="library-empty-shelf" aria-hidden="true">
+              <div class="library-empty-cover library-empty-cover-sun">最近专辑</div>
+              <div class="library-empty-cover library-empty-cover-pearl">等待索引</div>
+              <div class="library-empty-cover library-empty-cover-moon">数据库离线</div>
+            </div>
+            <p class="summary" id="library-albums-empty">曲库数据库暂时不可用。</p>
+            <p class="summary library-empty-meta" id="library-albums-empty-meta">先确认当前挂载和曲库数据库状态，再回来继续浏览。</p>
+          </div>
         {{end}}
       </section>
 
-      <section class="card">
-        <h2>Tracks</h2>
+      <section class="card page-main library-primary-tracks">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">曲目列表</p>
+            <h2 id="library-tracks-heading">{{if .SelectedAlbumUID}}专辑曲目{{else if .SelectedDirectoryVolumeUUID}}文件夹曲目{{else}}全部曲目{{end}}</h2>
+          </div>
+          <p class="summary section-summary" id="library-tracks-context">
+            {{if .SelectedAlbumUID}}
+              这里保持专辑自然顺序，`播放` 会继续沿用当前专辑上下文。
+            {{else if .SelectedDirectoryVolumeUUID}}
+              当前是文件夹级别的曲目访问路径，专辑浏览仍然保留在上方。
+            {{else}}
+              这里是全量索引曲目流；上面的专辑视图仍是更自然的主入口。
+            {{end}}
+          </p>
+        </div>
         {{if .TrackEntries}}
-          <div class="library-list">
+          <div class="library-list" id="library-tracks-list">
             {{range .TrackEntries}}
-              <article class="library-item">
-                <p class="library-title">{{.Title}}</p>
-                <p class="library-meta">{{.Artist}} · {{.FormatLabel}} · {{.DurationLabel}}</p>
-                <p class="library-meta">{{.RelativePath}}</p>
+              <article class="library-item library-track-item {{if .IsCurrent}}library-item-current{{end}}" data-track-uid="{{.TrackUID}}">
+                <div class="library-track-shell">
+                  <div class="track-order-badge">{{.TrackNumberLabel}}</div>
+                  <div class="library-track-main">
+                    <p class="library-title">
+                      <span class="library-track-title-text">{{.Title}}</span>
+                      <span class="track-state-pill-slot">
+                        {{if .IsCurrent}}
+                          {{if eq $.PlaybackStatus.State "quiet_active"}}
+                            <span class="pill pill-playing">播放中</span>
+                          {{else if eq $.PlaybackStatus.State "paused"}}
+                            <span class="pill pill-paused">已暂停</span>
+                          {{else}}
+                            <span class="pill pill-current">{{$.PlaybackStatus.State}}</span>
+                          {{end}}
+                        {{end}}
+                      </span>
+                    </p>
+                    <p class="library-track-chip-row">
+                      {{if .Artist}}<span class="track-meta-chip">{{.Artist}}</span>{{end}}
+                      {{if not $.SelectedAlbumUID}}<span class="track-meta-chip">{{.AlbumTitle}}</span>{{end}}
+                      <span class="track-meta-chip">{{.FormatLabel}}</span>
+                      <span class="track-meta-chip">{{.DurationLabel}}</span>
+                    </p>
+                    <p class="library-meta library-track-path">{{.RelativePath}}</p>
+                    <p class="library-meta library-track-debug">track {{.TrackUID}}</p>
+                  </div>
+                  <form method="post" action="/library/commands" class="actions library-row-actions library-track-actions">
+                    <input type="hidden" name="track_id" value="{{.TrackUID}}">
+                    {{if $.SelectedAlbumUID}}
+                      <input type="hidden" name="album_uid" value="{{$.SelectedAlbumUID}}">
+                    {{end}}
+                    {{if $.SelectedDirectoryVolumeUUID}}
+                      <input type="hidden" name="volume_uuid" value="{{$.SelectedDirectoryVolumeUUID}}">
+                      {{if $.SelectedDirectoryPath}}
+                        <input type="hidden" name="directory" value="{{$.SelectedDirectoryPath}}">
+                      {{end}}
+                    {{end}}
+                    <button type="submit" name="action" value="play">
+                      {{if and .IsCurrent (eq $.PlaybackStatus.State "paused")}}继续播放{{else}}播放{{end}}
+                    </button>
+                  </form>
+                </div>
               </article>
             {{end}}
           </div>
+          <div class="library-empty-state library-empty-state-compact" id="library-tracks-empty-state" hidden>
+            <div class="library-track-preview" aria-hidden="true">
+              <div class="library-track-preview-row">
+                <span class="library-track-preview-order">01</span>
+                <div class="library-track-preview-copy">
+                  <strong>第一首歌会出现在这里</strong>
+                  <span>连上曲库后会看到时长、格式和艺人信息</span>
+                </div>
+              </div>
+              <div class="library-track-preview-row">
+                <span class="library-track-preview-order">02</span>
+                <div class="library-track-preview-copy">
+                  <strong>保持专辑或全库顺序</strong>
+                  <span>播放会沿用当前浏览上下文</span>
+                </div>
+              </div>
+            </div>
+            <p class="summary" id="library-tracks-empty" hidden>还没有索引到曲目。</p>
+            <p class="summary library-empty-meta" id="library-tracks-empty-meta">等专辑进入索引后，这里会按专辑或全库顺序显示。</p>
+          </div>
         {{else if .LibrarySnapshot.Available}}
-          <p class="summary">No indexed tracks yet.</p>
+          <div class="library-list" id="library-tracks-list" hidden></div>
+          <div class="library-empty-state library-empty-state-compact" id="library-tracks-empty-state">
+            <div class="library-track-preview" aria-hidden="true">
+              <div class="library-track-preview-row">
+                <span class="library-track-preview-order">01</span>
+                <div class="library-track-preview-copy">
+                  <strong>第一首歌会出现在这里</strong>
+                  <span>连上曲库后会看到时长、格式和艺人信息</span>
+                </div>
+              </div>
+              <div class="library-track-preview-row">
+                <span class="library-track-preview-order">02</span>
+                <div class="library-track-preview-copy">
+                  <strong>保持专辑或全库顺序</strong>
+                  <span>播放会沿用当前浏览上下文</span>
+                </div>
+              </div>
+            </div>
+            <p class="summary" id="library-tracks-empty">还没有索引到曲目。</p>
+            <p class="summary library-empty-meta" id="library-tracks-empty-meta">等专辑进入索引后，这里会按专辑或全库顺序显示。</p>
+          </div>
         {{else}}
-          <p class="summary">Library database is unavailable.</p>
+          <div class="library-list" id="library-tracks-list" hidden></div>
+          <div class="library-empty-state library-empty-state-compact" id="library-tracks-empty-state">
+            <div class="library-track-preview" aria-hidden="true">
+              <div class="library-track-preview-row">
+                <span class="library-track-preview-order">--</span>
+                <div class="library-track-preview-copy">
+                  <strong>曲目列表暂时不可用</strong>
+                  <span>先恢复数据库和挂载状态，再回来继续浏览。</span>
+                </div>
+              </div>
+            </div>
+            <p class="summary" id="library-tracks-empty">曲库数据库暂时不可用。</p>
+            <p class="summary library-empty-meta" id="library-tracks-empty-meta">先确认当前挂载和曲库数据库状态，再回来继续浏览。</p>
+          </div>
         {{end}}
       </section>
     </main>
+    <footer class="player-dock">
+      <div class="player-dock-copy">
+        <p class="player-dock-kicker">曲库迷你播放器</p>
+        <p class="player-dock-title" id="library-player-title">{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else if .NowPlaying.TrackUID}}{{.NowPlaying.TrackUID}}{{else}}还没有播放歌曲{{end}}</p>
+        <p class="player-dock-meta">
+          <span id="library-player-state">{{playbackStateLabel .PlaybackStatus.State}}</span>
+          <span id="library-player-location">
+            {{if .NowPlaying.Artist}}{{.NowPlaying.Artist}}{{else if .NowPlaying.RelativePath}}{{.NowPlaying.RelativePath}}{{else}}本地曲库已就绪{{end}}
+          </span>
+          <span id="library-player-context">
+            {{if .SelectedAlbumUID}}专辑视图{{else if .SelectedDirectoryVolumeUUID}}文件夹视图{{else}}全部曲目{{end}}
+          </span>
+        </p>
+      </div>
+      <form method="post" action="/library/commands" class="actions player-dock-actions">
+        {{if .SelectedAlbumUID}}
+          <input type="hidden" name="album_uid" value="{{.SelectedAlbumUID}}">
+        {{end}}
+        {{if .SelectedDirectoryVolumeUUID}}
+          <input type="hidden" name="volume_uuid" value="{{.SelectedDirectoryVolumeUUID}}">
+          {{if .SelectedDirectoryPath}}
+            <input type="hidden" name="directory" value="{{.SelectedDirectoryPath}}">
+          {{end}}
+        {{end}}
+        <input type="hidden" name="track_id" value="{{.NowPlaying.TrackUID}}" data-library-transport-track-id>
+        <button type="submit" name="action" value="prev">上一首</button>
+        <button type="submit" name="action" value="{{transportPrimaryAction .PlaybackStatus.State}}" data-library-transport-primary>{{transportPrimaryLabel .PlaybackStatus.State}}</button>
+        <button type="submit" name="action" value="next">下一首</button>
+        <button type="submit" name="action" value="stop">停止</button>
+      </form>
+    </footer>
+    <script>
+      (() => {
+        const statusNode = document.getElementById("library-live-status");
+        if (!statusNode || !window.EventSource) {
+          return;
+        }
+
+        const endpoints = {
+          librarySnapshotBase: '{{.LibrarySnapshotPath}}'.split("?")[0],
+          libraryCommands: '{{.LibraryCommandsPath}}',
+          playbackStatus: '{{.PlaybackStatusPath}}',
+          playbackQueue: '{{.PlaybackQueuePath}}',
+          playbackEvents: '{{.PlaybackStreamPath}}'
+        };
+        const stream = new EventSource(endpoints.playbackEvents);
+        let latestLibrarySnapshot = null;
+        let refreshPending = false;
+        let pageContext = null;
+
+        const textValue = (value, fallback = "-") => {
+          if (value === null || value === undefined) {
+            return fallback;
+          }
+          const normalized = String(value).trim();
+          return normalized === "" ? fallback : normalized;
+        };
+
+        const rawValue = (value) => {
+          if (value === null || value === undefined) {
+            return "";
+          }
+          return String(value).trim();
+        };
+
+        const playbackStateLabel = (value) => {
+          const normalized = rawValue(value);
+          const map = {
+            quiet_active: "正在播放",
+            pre_quiet: "准备播放",
+            paused: "已暂停",
+            stopped: "已停止",
+            idle: "空闲",
+            failed: "播放失败"
+          };
+          return map[normalized] || textValue(value, "未知状态");
+        };
+
+        const normalizeLibraryQuery = (query = {}) => ({
+          albumUID: rawValue(query.albumUID ?? query.album_uid),
+          directoryVolumeUUID: rawValue(query.directoryVolumeUUID ?? query.directory_volume_uuid),
+          directoryPath: rawValue(query.directoryPath ?? query.directory_path)
+        });
+
+        const readLibraryQueryFromURL = (locationLike = window.location) => {
+          const params = new URLSearchParams(locationLike.search || "");
+          return normalizeLibraryQuery({
+            albumUID: params.get("album_uid"),
+            directoryVolumeUUID: params.get("volume_uuid"),
+            directoryPath: params.get("directory")
+          });
+        };
+
+        const setPageContext = (query = {}) => {
+          pageContext = normalizeLibraryQuery(query);
+          return pageContext;
+        };
+
+        setPageContext(readLibraryQueryFromURL());
+
+        const setText = (id, value, fallback = "-") => {
+          const node = document.getElementById(id);
+          if (!node) {
+            return;
+          }
+          node.textContent = textValue(value, fallback);
+        };
+
+        const setPill = (id, className, label) => {
+          const node = document.getElementById(id);
+          if (!node) {
+            return;
+          }
+          node.className = `pill ${className}`;
+          node.textContent = label;
+        };
+
+        const setBanner = (wrapperId, valueId, value) => {
+          const wrapper = document.getElementById(wrapperId);
+          if (!wrapper) {
+            return;
+          }
+          if (!valueId) {
+            wrapper.hidden = !value;
+            return;
+          }
+          const valueNode = document.getElementById(valueId);
+          if (!valueNode) {
+            return;
+          }
+          if (!value) {
+            wrapper.hidden = true;
+            valueNode.textContent = "";
+            return;
+          }
+          wrapper.hidden = false;
+          valueNode.textContent = value;
+        };
+
+        const fetchJSON = async (path) => {
+          const response = await fetch(path, {
+            headers: {Accept: "application/json"}
+          });
+          if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+          }
+          return response.json();
+        };
+
+        const postJSON = async (path, payload) => {
+          const response = await fetch(path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json();
+          return {ok: response.ok, data};
+        };
+
+        const setCommandBanners = (message, error) => {
+          setBanner("library-command-message", "library-command-message-value", message);
+          setBanner("library-command-error", "library-command-error-value", error);
+        };
+
+        const isPlaybackScanBlocked = (state) => state === "pre_quiet" || state === "quiet_active";
+        const transportIsPauseState = (state) => ["playing", "quiet_active", "pre_quiet"].includes(rawValue(state));
+        const transportPrimaryAction = (state) => transportIsPauseState(state) ? "pause" : "play";
+        const transportPrimaryLabel = (state) => transportIsPauseState(state) ? "暂停" : "播放";
+
+        const pillMarkupForPlaybackState = (state) => {
+          if (state === "quiet_active") {
+            return '<span class="pill pill-playing">播放中</span>';
+          }
+          if (state === "paused") {
+            return '<span class="pill pill-paused">已暂停</span>';
+          }
+          return `<span class="pill pill-current">${playbackStateLabel(state)}</span>`;
+        };
+
+        const findNowPlaying = (playbackStatus, queueSnapshot, librarySnapshot) => {
+          if (!playbackStatus.current_track) {
+            return null;
+          }
+
+          const queueEntries = Array.isArray(queueSnapshot.entries) ? queueSnapshot.entries : [];
+          const queueMatch = queueEntries.find((entry) => entry.track_uid === playbackStatus.current_track);
+          if (queueMatch) {
+            return {
+              trackUID: playbackStatus.current_track,
+              title: queueMatch.title || queueMatch.track_uid,
+              artist: "",
+              relativePath: queueMatch.relative_path || ""
+            };
+          }
+
+          const tracks = Array.isArray(librarySnapshot?.tracks) ? librarySnapshot.tracks : [];
+          const trackMatch = tracks.find((track) => track.track_uid === playbackStatus.current_track);
+          if (trackMatch) {
+            return {
+              trackUID: playbackStatus.current_track,
+              title: trackMatch.title || trackMatch.track_uid,
+              artist: trackMatch.artist || "",
+              relativePath: trackMatch.relative_path || ""
+            };
+          }
+
+          return {
+            trackUID: playbackStatus.current_track,
+            title: playbackStatus.current_track,
+            artist: "",
+            relativePath: ""
+          };
+        };
+
+        const contextHiddenInputs = (trackUID) => {
+          const parts = [];
+          if (pageContext.albumUID) {
+            parts.push(`<input type="hidden" name="album_uid" value="${pageContext.albumUID}">`);
+          }
+          if (pageContext.directoryVolumeUUID) {
+            parts.push(`<input type="hidden" name="volume_uuid" value="${pageContext.directoryVolumeUUID}">`);
+          }
+          if (pageContext.directoryPath) {
+            parts.push(`<input type="hidden" name="directory" value="${pageContext.directoryPath}">`);
+          }
+          if (trackUID) {
+            parts.push(`<input type="hidden" name="track_id" value="${trackUID}" data-library-transport-track-id>`);
+          }
+          return parts.join("");
+        };
+
+        const refreshLibraryTransportControls = (playbackStatus, nowPlaying) => {
+          const action = transportPrimaryAction(playbackStatus.state);
+          const label = transportPrimaryLabel(playbackStatus.state);
+          const trackUID = rawValue(playbackStatus.current_track || nowPlaying?.trackUID);
+          document.querySelectorAll("[data-library-transport-primary]").forEach((button) => {
+            button.value = action;
+            button.textContent = label;
+            button.disabled = action === "play" && !trackUID;
+          });
+          document.querySelectorAll("[data-library-transport-track-id]").forEach((input) => {
+            input.value = trackUID;
+          });
+        };
+
+        const refreshTrackHighlights = (playbackStatus) => {
+          document.querySelectorAll(".library-track-item").forEach((item) => {
+            const isCurrent = item.dataset.trackUid === playbackStatus.current_track && playbackStatus.current_track;
+            item.classList.toggle("library-item-current", Boolean(isCurrent));
+            const slot = item.querySelector(".track-state-pill-slot");
+            if (!slot) {
+              return;
+            }
+            slot.innerHTML = isCurrent ? pillMarkupForPlaybackState(playbackStatus.state) : "";
+          });
+        };
+
+        const refreshNowPlaying = (playbackStatus, queueSnapshot, librarySnapshot) => {
+          const container = document.getElementById("library-now-playing");
+          const title = document.getElementById("library-now-playing-title-text");
+          const pill = document.getElementById("library-now-playing-pill");
+          const artist = document.getElementById("library-now-playing-artist");
+          const path = document.getElementById("library-now-playing-path");
+          const actions = document.getElementById("library-now-playing-actions");
+          if (!container || !title || !pill || !artist || !path || !actions) {
+            return;
+          }
+
+          const nowPlaying = findNowPlaying(playbackStatus, queueSnapshot, librarySnapshot);
+          if (!nowPlaying) {
+            container.hidden = true;
+            refreshLibraryTransportControls(playbackStatus, null);
+            return;
+          }
+
+          container.hidden = false;
+          container.classList.toggle("now-playing-active", playbackStatus.state === "quiet_active");
+          title.textContent = nowPlaying.title;
+          pill.innerHTML = pillMarkupForPlaybackState(playbackStatus.state);
+
+          artist.hidden = !nowPlaying.artist;
+          artist.textContent = nowPlaying.artist || "";
+          path.hidden = !nowPlaying.relativePath;
+          path.textContent = nowPlaying.relativePath || "";
+
+          actions.innerHTML = `${contextHiddenInputs(nowPlaying.trackUID)}<button type="submit" name="action" value="${transportPrimaryAction(playbackStatus.state)}" data-library-transport-primary>${transportPrimaryLabel(playbackStatus.state)}</button><button type="submit" name="action" value="stop">停止</button>`;
+          refreshLibraryTransportControls(playbackStatus, nowPlaying);
+        };
+
+        const refreshMiniPlayer = (playbackStatus, queueSnapshot, librarySnapshot) => {
+          const title = document.getElementById("library-player-title");
+          const state = document.getElementById("library-player-state");
+          const location = document.getElementById("library-player-location");
+          const context = document.getElementById("library-player-context");
+          if (!title || !state || !location || !context) {
+            return;
+          }
+
+          const nowPlaying = findNowPlaying(playbackStatus, queueSnapshot, librarySnapshot);
+          title.textContent = nowPlaying ? textValue(nowPlaying.title, "还没有播放歌曲") : "还没有播放歌曲";
+          state.textContent = playbackStateLabel(playbackStatus.state);
+          location.textContent = nowPlaying ? textValue(nowPlaying.artist || nowPlaying.relativePath, "本地曲库已就绪") : "本地曲库已就绪";
+          if (pageContext.albumUID) {
+            context.textContent = "专辑视图";
+          } else if (pageContext.directoryVolumeUUID) {
+            context.textContent = "文件夹视图";
+          } else {
+            context.textContent = "全部曲目";
+          }
+          refreshLibraryTransportControls(playbackStatus, nowPlaying);
+        };
+
+        const refreshPlaybackBoundary = (playbackStatus, queueSnapshot, librarySnapshot) => {
+          setText("library-playback-state", playbackStateLabel(playbackStatus.state), "未知状态");
+          setText("library-current-track", playbackStatus.current_track);
+          const blocked = isPlaybackScanBlocked(playbackStatus.state);
+          setBanner("library-scan-block-banner", "", blocked);
+          const summary = document.getElementById("library-scan-block-summary");
+          if (summary) {
+            summary.hidden = blocked;
+          }
+          refreshNowPlaying(playbackStatus, queueSnapshot, librarySnapshot);
+          refreshMiniPlayer(playbackStatus, queueSnapshot, librarySnapshot);
+          refreshTrackHighlights(playbackStatus);
+        };
+
+        const refreshLibraryStatus = (librarySnapshot) => {
+          setPill("library-db-pill", librarySnapshot.available ? "pill-ok" : "pill-offline", librarySnapshot.available ? "在线" : "离线");
+          setText("library-db-path", librarySnapshot.db_path);
+          setText("library-volume-count", librarySnapshot.stats?.volume_count ?? 0, "0");
+          setText("library-album-count", librarySnapshot.stats?.album_count ?? 0, "0");
+          setText("library-track-count", librarySnapshot.stats?.track_count ?? 0, "0");
+          setText("library-artist-count", librarySnapshot.stats?.artist_count ?? 0, "0");
+          setText("library-genre-count", librarySnapshot.stats?.genre_count ?? 0, "0");
+          setBanner("library-query-error", "library-query-error-value", librarySnapshot.error);
+        };
+
+        const buildLibraryURL = (query = {}) => {
+          const params = new URLSearchParams();
+          if (query.albumUID) {
+            params.set("album_uid", query.albumUID);
+          }
+          if (query.directoryVolumeUUID) {
+            params.set("volume_uuid", query.directoryVolumeUUID);
+          }
+          if (query.directoryPath) {
+            params.set("directory", query.directoryPath);
+          }
+          const encoded = params.toString();
+          return encoded ? `/library?${encoded}` : "/library";
+        };
+
+        const buildLibrarySnapshotPath = (query = pageContext) => {
+          const params = new URLSearchParams();
+          if (query.albumUID) {
+            params.set("album_uid", query.albumUID);
+          }
+          if (query.directoryVolumeUUID) {
+            params.set("volume_uuid", query.directoryVolumeUUID);
+          }
+          if (query.directoryPath) {
+            params.set("directory", query.directoryPath);
+          }
+          const encoded = params.toString();
+          return encoded ? `${endpoints.librarySnapshotBase}?${encoded}` : endpoints.librarySnapshotBase;
+        };
+
+        const durationMSLabel = (durationMS) => {
+          if (!durationMS || durationMS <= 0) {
+            return "-";
+          }
+          const totalSeconds = Math.floor(durationMS / 1000);
+          const minutes = Math.floor(totalSeconds / 60);
+          const seconds = totalSeconds % 60;
+          return `${minutes}:${String(seconds).padStart(2, "0")}`;
+        };
+
+        const formatTrackFormat = (track) => {
+          const format = rawValue(track.format);
+          const sampleRate = track.sample_rate;
+          if (!format && !sampleRate) {
+            return "-";
+          }
+          if (!sampleRate) {
+            return format;
+          }
+          if (!format) {
+            return `${sampleRate} Hz`;
+          }
+          return `${format} · ${sampleRate} Hz`;
+        };
+
+        const selectedDirectoryTitle = () => {
+          if (!pageContext.directoryVolumeUUID) {
+            return "";
+          }
+          if (!pageContext.directoryPath) {
+            return "存储根目录";
+          }
+          const parts = pageContext.directoryPath.split("/");
+          return parts[parts.length - 1];
+        };
+
+        const parentDirectoryBrowsePath = () => {
+          if (!pageContext.directoryVolumeUUID) {
+            return "/library";
+          }
+          if (!pageContext.directoryPath) {
+            return buildLibraryURL({});
+          }
+          const lastSlash = pageContext.directoryPath.lastIndexOf("/");
+          const parent = lastSlash >= 0 ? pageContext.directoryPath.slice(0, lastSlash) : "";
+          return buildLibraryURL({
+            directoryVolumeUUID: pageContext.directoryVolumeUUID,
+            directoryPath: parent
+          });
+        };
+
+        const selectedAlbumTitle = (librarySnapshot) => {
+          if (!pageContext.albumUID) {
+            return "";
+          }
+          if (pageContext.albumUID === "__uncategorized__") {
+            return "未分类";
+          }
+          const album = (librarySnapshot.albums || []).find((entry) => entry.album_uid === pageContext.albumUID);
+          return album ? album.title : "";
+        };
+
+        const selectedVolumeLabel = (librarySnapshot) => {
+          const volumes = Array.isArray(librarySnapshot?.volumes) ? librarySnapshot.volumes : [];
+          const volume = volumes.find((entry) => rawValue(entry.volume_uuid) === pageContext.directoryVolumeUUID);
+          return volume ? textValue(volume.label, "当前存储设备") : "当前存储设备";
+        };
+
+        const buildAlbumEntries = (librarySnapshot) => {
+          const albums = Array.isArray(librarySnapshot.albums) ? librarySnapshot.albums : [];
+          const entries = [];
+          let uncategorizedTrackCount = 0;
+
+          albums.forEach((album) => {
+            if (album.source_mode === "directory_fallback" && album.track_count === 1) {
+              uncategorizedTrackCount += album.track_count;
+              return;
+            }
+            entries.push({
+              albumUID: album.album_uid,
+              title: album.title,
+              albumArtist: textValue(album.album_artist),
+              yearLabel: album.year > 0 ? String(album.year) : "-",
+              trackCount: album.track_count ?? 0,
+              durationLabel: durationMSLabel(album.total_duration_ms),
+              rootDirHint: textValue(album.root_dir_hint),
+              coverThumbLabel: textValue(album.cover_thumb_rel_path),
+              coverThumbPath: rawValue(album.cover_thumb_rel_path) ? `/artwork/${album.cover_thumb_rel_path}` : "",
+              browsePath: buildLibraryURL({albumUID: album.album_uid}),
+              isSelected: pageContext.albumUID && pageContext.albumUID === album.album_uid
+            });
+          });
+
+          if (uncategorizedTrackCount > 0) {
+            entries.push({
+              albumUID: "__uncategorized__",
+              title: "未分类",
+              albumArtist: "抓不到专辑信息的散曲",
+              yearLabel: "-",
+              trackCount: uncategorizedTrackCount,
+              durationLabel: "-",
+              rootDirHint: "混合文件夹 / 缺少专辑元数据",
+              coverThumbLabel: "-",
+              coverThumbPath: "",
+              browsePath: buildLibraryURL({albumUID: "__uncategorized__"}),
+              isSelected: pageContext.albumUID === "__uncategorized__"
+            });
+          }
+
+          return entries;
+        };
+
+        const createMeta = (text) => {
+          const node = document.createElement("p");
+          node.className = "library-meta";
+          node.textContent = text;
+          return node;
+        };
+
+        const trackOrdinalLabel = (track, index) => {
+          const trackNo = Number(track.track_no);
+          const discNo = Number(track.disc_no);
+          if (Number.isFinite(trackNo) && trackNo > 0) {
+            if (Number.isFinite(discNo) && discNo > 1) {
+              return `${discNo}-${String(trackNo).padStart(2, "0")}`;
+            }
+            return String(trackNo).padStart(2, "0");
+          }
+          if (Number.isFinite(discNo) && discNo > 1) {
+            return String(discNo);
+          }
+          return String(index + 1).padStart(2, "0");
+        };
+
+        const trackSectionSummary = () => {
+          if (pageContext.albumUID) {
+            return "这里保持专辑自然顺序，播放会继续沿用当前专辑上下文。";
+          }
+          if (pageContext.directoryVolumeUUID) {
+            return "当前是文件夹级别的浏览路径，专辑浏览仍保留在上方。";
+          }
+          return "这里展示全量索引曲目；上面的专辑视图仍是更自然的入口。";
+        };
+
+        const refreshLibraryFocus = (librarySnapshot) => {
+          const mode = document.getElementById("library-focus-mode");
+          const selection = document.getElementById("library-focus-selection");
+          const density = document.getElementById("library-focus-density");
+          const title = document.getElementById("library-focus-title");
+          const meta = document.getElementById("library-focus-meta");
+          const reset = document.getElementById("library-focus-reset");
+          if (!mode || !selection || !density || !title || !meta || !reset) {
+            return;
+          }
+
+          const stats = librarySnapshot.stats || {};
+          const densityText = `${stats.album_count ?? 0} 张专辑 · ${stats.track_count ?? 0} 首歌曲`;
+          density.textContent = densityText;
+
+          const albums = buildAlbumEntries(librarySnapshot);
+          const activeAlbum = pageContext.albumUID
+            ? albums.find((entry) => entry.albumUID === pageContext.albumUID)
+            : null;
+
+          if (pageContext.albumUID) {
+            const activeTitle = activeAlbum?.title || selectedAlbumTitle(librarySnapshot) || "当前专辑";
+            mode.textContent = "专辑视图";
+            selection.textContent = activeTitle;
+            title.textContent = activeTitle;
+            meta.textContent = `${textValue(activeAlbum?.albumArtist, "未知艺人")} · ${textValue(activeAlbum?.yearLabel, "-")} · ${textValue(activeAlbum?.trackCount ?? 0, "0")} 首，可直接进入队列播放。`;
+            reset.hidden = false;
+            return;
+          }
+
+          if (pageContext.directoryVolumeUUID) {
+            const folderTitle = selectedDirectoryTitle();
+            mode.textContent = "文件夹视图";
+            selection.textContent = folderTitle;
+            title.textContent = folderTitle;
+            meta.textContent = `${selectedVolumeLabel(librarySnapshot)} · ${textValue(pageContext.directoryPath || "/", "/")} · 仍可从这里直接播放。`;
+            reset.hidden = false;
+            return;
+          }
+
+          mode.textContent = "完整曲库";
+          selection.textContent = "专辑墙已就绪";
+          title.textContent = "专辑优先的本地浏览";
+          meta.textContent = `${densityText} 已就绪。默认先看专辑，只有在需要精确文件系统上下文时再进入文件夹。`;
+          reset.hidden = true;
+        };
+
+        const renderVolumes = (librarySnapshot) => {
+          const list = document.getElementById("library-volumes-list");
+          const empty = document.getElementById("library-volumes-empty");
+          if (!list || !empty) {
+            return;
+          }
+
+          list.replaceChildren();
+          const volumes = Array.isArray(librarySnapshot.volumes) ? librarySnapshot.volumes : [];
+          if (volumes.length === 0) {
+            list.hidden = true;
+            empty.hidden = false;
+            empty.textContent = librarySnapshot.available ? "还没有索引到存储设备。" : "曲库数据库暂时不可用。";
+            return;
+          }
+
+          volumes.forEach((volume) => {
+            const article = document.createElement("article");
+            article.className = "library-item";
+
+            const title = document.createElement("p");
+            title.className = "library-title";
+            title.append(document.createTextNode(textValue(volume.label)));
+            const pill = document.createElement("span");
+            pill.className = `pill ${volume.is_available ? "pill-ok" : "pill-offline"}`;
+            pill.textContent = volume.is_available ? "已挂载" : "缺失";
+            title.appendChild(document.createTextNode(" "));
+            title.appendChild(pill);
+            article.appendChild(title);
+
+            article.appendChild(createMeta(`uuid ${textValue(volume.volume_uuid)}`));
+            article.appendChild(createMeta(textValue(volume.mount_path)));
+            article.appendChild(createMeta(`最近出现 ${textValue(volume.last_seen_at, "0")}`));
+
+            const browse = document.createElement("p");
+            browse.className = "library-meta";
+            const link = document.createElement("a");
+            link.className = "inline-link";
+            link.href = buildLibraryURL({directoryVolumeUUID: volume.volume_uuid});
+            link.textContent = "浏览文件夹";
+            browse.appendChild(link);
+            article.appendChild(browse);
+            list.appendChild(article);
+          });
+
+          list.hidden = false;
+          empty.hidden = true;
+        };
+
+        const renderDirectories = (librarySnapshot) => {
+          const context = document.getElementById("library-folders-context");
+          const list = document.getElementById("library-directories-list");
+          const empty = document.getElementById("library-directories-empty");
+          if (!context || !list || !empty) {
+            return;
+          }
+
+          if (pageContext.directoryVolumeUUID) {
+            context.className = "banner banner-ok";
+            context.innerHTML = "";
+            context.append(`当前文件夹：${selectedDirectoryTitle()}`);
+            context.appendChild(document.createTextNode(" "));
+            const link = document.createElement("a");
+            link.className = "inline-link";
+            link.href = pageContext.directoryPath ? parentDirectoryBrowsePath() : "/library";
+            link.textContent = pageContext.directoryPath ? "返回上一级" : "退出文件夹视图";
+            context.appendChild(link);
+          } else {
+            context.className = "summary";
+            context.textContent = "只有在需要精确路径时，再从上面的存储设备进入文件夹浏览。";
+          }
+
+          list.replaceChildren();
+          const directories = Array.isArray(librarySnapshot.directories) ? librarySnapshot.directories : [];
+          if (directories.length === 0) {
+            list.hidden = true;
+            empty.hidden = false;
+            empty.textContent = pageContext.directoryVolumeUUID
+              ? "这个文件夹下没有索引到子目录。"
+              : "选择一个存储设备后，文件夹浏览才会启用。";
+            return;
+          }
+
+          directories.forEach((directory) => {
+            const article = document.createElement("article");
+            const isSelected = pageContext.directoryVolumeUUID === directory.volume_uuid && pageContext.directoryPath === directory.relative_path;
+            article.className = `library-item${isSelected ? " library-item-current" : ""}`;
+
+            const title = document.createElement("p");
+            title.className = "library-title";
+            const link = document.createElement("a");
+            link.className = "inline-link";
+            link.href = buildLibraryURL({
+              directoryVolumeUUID: directory.volume_uuid,
+              directoryPath: directory.relative_path
+            });
+            link.textContent = textValue(directory.display_name);
+            title.appendChild(link);
+            if (isSelected) {
+              title.appendChild(document.createTextNode(" "));
+              const pill = document.createElement("span");
+              pill.className = "pill pill-current";
+              pill.textContent = "已打开";
+              title.appendChild(pill);
+            }
+            article.appendChild(title);
+            article.appendChild(createMeta(textValue(directory.relative_path)));
+            list.appendChild(article);
+          });
+
+          list.hidden = false;
+          empty.hidden = true;
+        };
+
+        const renderAlbums = (librarySnapshot) => {
+          const context = document.getElementById("library-albums-context");
+          const list = document.getElementById("library-albums-list");
+          const empty = document.getElementById("library-albums-empty");
+          const emptyState = document.getElementById("library-albums-empty-state");
+          const emptyMeta = document.getElementById("library-albums-empty-meta");
+          if (!context || !list || !empty || !emptyState) {
+            return;
+          }
+
+          if (pageContext.albumUID) {
+            context.className = "banner banner-ok";
+            context.innerHTML = "";
+            context.append(`当前专辑：${selectedAlbumTitle(librarySnapshot)}`);
+            context.appendChild(document.createTextNode(" "));
+            const link = document.createElement("a");
+            link.className = "inline-link";
+            link.href = "/library";
+            link.textContent = "显示全部曲目";
+            context.appendChild(link);
+          } else {
+            context.className = "summary";
+            context.textContent = "点击任意专辑名，就能在下面看到这个专辑的完整曲目顺序。";
+          }
+
+          list.replaceChildren();
+          const albums = buildAlbumEntries(librarySnapshot);
+          if (albums.length === 0) {
+            list.hidden = true;
+            empty.hidden = false;
+            emptyState.hidden = false;
+            empty.textContent = librarySnapshot.available ? "还没有索引到专辑。" : "曲库数据库暂时不可用。";
+            if (emptyMeta) {
+              emptyMeta.textContent = librarySnapshot.available
+                ? "插入 TF 或 USB 并完成扫描后，最近专辑会先出现在这里。"
+                : "先确认当前挂载和曲库数据库状态，再回来继续浏览。";
+            }
+            return;
+          }
+
+          albums.forEach((album) => {
+            const article = document.createElement("article");
+            article.className = `library-item${album.isSelected ? " library-item-current" : ""}`;
+
+            const coverLink = document.createElement("a");
+            coverLink.href = album.browsePath;
+            coverLink.className = "library-cover-link";
+            if (album.coverThumbPath) {
+              const image = document.createElement("img");
+              image.src = album.coverThumbPath;
+              image.alt = `${album.title} cover`;
+              image.className = "library-cover-art";
+              coverLink.appendChild(image);
+            } else {
+              const placeholder = document.createElement("span");
+              placeholder.className = "library-cover-art library-cover-placeholder";
+              placeholder.textContent = album.title;
+              coverLink.appendChild(placeholder);
+            }
+            article.appendChild(coverLink);
+
+            const title = document.createElement("p");
+            title.className = "library-title";
+            const link = document.createElement("a");
+            link.className = "inline-link";
+            link.href = album.browsePath;
+            link.textContent = album.title;
+            title.appendChild(link);
+            if (album.isSelected) {
+              title.appendChild(document.createTextNode(" "));
+              const pill = document.createElement("span");
+              pill.className = "pill pill-current";
+              pill.textContent = "已打开";
+              title.appendChild(pill);
+            }
+            article.appendChild(title);
+
+            article.appendChild(createMeta(`${album.albumArtist} · ${album.yearLabel} · ${album.trackCount} 首 · ${album.durationLabel}`));
+            article.appendChild(createMeta(album.rootDirHint));
+
+            const thumb = document.createElement("p");
+            thumb.className = "library-meta library-artwork-state";
+            if (album.coverThumbPath) {
+              const thumbLink = document.createElement("a");
+              thumbLink.href = album.coverThumbPath;
+              thumbLink.target = "_blank";
+              thumbLink.rel = "noreferrer";
+              thumbLink.textContent = "查看封面";
+              thumb.appendChild(thumbLink);
+            } else {
+              thumb.append("暂无封面");
+            }
+            article.appendChild(thumb);
+
+            list.appendChild(article);
+          });
+
+          list.hidden = false;
+          empty.hidden = true;
+          emptyState.hidden = true;
+        };
+
+        const renderTracks = (librarySnapshot, playbackStatus) => {
+          const heading = document.getElementById("library-tracks-heading");
+          const context = document.getElementById("library-tracks-context");
+          const list = document.getElementById("library-tracks-list");
+          const empty = document.getElementById("library-tracks-empty");
+          const emptyState = document.getElementById("library-tracks-empty-state");
+          const emptyMeta = document.getElementById("library-tracks-empty-meta");
+          if (!heading || !context || !list || !empty || !emptyState) {
+            return;
+          }
+
+          if (pageContext.albumUID) {
+            heading.textContent = "专辑曲目";
+          } else if (pageContext.directoryVolumeUUID) {
+            heading.textContent = "文件夹曲目";
+          } else {
+            heading.textContent = "全部曲目";
+          }
+          context.textContent = trackSectionSummary();
+
+          list.replaceChildren();
+          const tracks = Array.isArray(librarySnapshot.tracks) ? librarySnapshot.tracks : [];
+          if (tracks.length === 0) {
+            list.hidden = true;
+            empty.hidden = false;
+            emptyState.hidden = false;
+            empty.textContent = librarySnapshot.available ? "还没有索引到曲目。" : "曲库数据库暂时不可用。";
+            if (emptyMeta) {
+              emptyMeta.textContent = librarySnapshot.available
+                ? "等专辑进入索引后，这里会按专辑或全库顺序显示。"
+                : "先确认当前挂载和曲库数据库状态，再回来继续浏览。";
+            }
+            return;
+          }
+
+          tracks.forEach((track, index) => {
+            const isCurrent = rawValue(playbackStatus.current_track) === rawValue(track.track_uid);
+            const article = document.createElement("article");
+            article.className = `library-item library-track-item${isCurrent ? " library-item-current" : ""}`;
+            article.dataset.trackUid = rawValue(track.track_uid);
+
+            const shell = document.createElement("div");
+            shell.className = "library-track-shell";
+
+            const orderBadge = document.createElement("div");
+            orderBadge.className = "track-order-badge";
+            orderBadge.textContent = trackOrdinalLabel(track, index);
+            shell.appendChild(orderBadge);
+
+            const main = document.createElement("div");
+            main.className = "library-track-main";
+
+            const title = document.createElement("p");
+            title.className = "library-title";
+            const titleText = document.createElement("span");
+            titleText.className = "library-track-title-text";
+            titleText.textContent = textValue(track.title);
+            title.appendChild(titleText);
+            const slot = document.createElement("span");
+            slot.className = "track-state-pill-slot";
+            slot.innerHTML = isCurrent ? pillMarkupForPlaybackState(playbackStatus.state) : "";
+            title.appendChild(slot);
+            main.appendChild(title);
+
+            const chipRow = document.createElement("p");
+            chipRow.className = "library-track-chip-row";
+            const chipValues = [];
+            if (rawValue(track.artist)) {
+              chipValues.push(textValue(track.artist));
+            }
+            if (!pageContext.albumUID && rawValue(track.album_title)) {
+              chipValues.push(textValue(track.album_title));
+            }
+            chipValues.push(formatTrackFormat(track));
+            chipValues.push(durationMSLabel(track.duration_ms));
+            chipValues.forEach((value) => {
+              const chip = document.createElement("span");
+              chip.className = "track-meta-chip";
+              chip.textContent = value;
+              chipRow.appendChild(chip);
+            });
+            main.appendChild(chipRow);
+
+            const path = createMeta(textValue(track.relative_path));
+            path.classList.add("library-track-path");
+            main.appendChild(path);
+
+            const debug = createMeta(`track ${textValue(track.track_uid)}`);
+            debug.classList.add("library-track-debug");
+            main.appendChild(debug);
+
+            const form = document.createElement("form");
+            form.method = "post";
+            form.action = "/library/commands";
+            form.className = "actions library-row-actions library-track-actions";
+
+            const trackInput = document.createElement("input");
+            trackInput.type = "hidden";
+            trackInput.name = "track_id";
+            trackInput.value = rawValue(track.track_uid);
+            form.appendChild(trackInput);
+
+            if (pageContext.albumUID) {
+              const input = document.createElement("input");
+              input.type = "hidden";
+              input.name = "album_uid";
+              input.value = pageContext.albumUID;
+              form.appendChild(input);
+            }
+            if (pageContext.directoryVolumeUUID) {
+              const volumeInput = document.createElement("input");
+              volumeInput.type = "hidden";
+              volumeInput.name = "volume_uuid";
+              volumeInput.value = pageContext.directoryVolumeUUID;
+              form.appendChild(volumeInput);
+              if (pageContext.directoryPath) {
+                const dirInput = document.createElement("input");
+                dirInput.type = "hidden";
+                dirInput.name = "directory";
+                dirInput.value = pageContext.directoryPath;
+                form.appendChild(dirInput);
+              }
+            }
+
+            const button = document.createElement("button");
+            button.type = "submit";
+            button.name = "action";
+            button.value = "play";
+            button.textContent = isCurrent && playbackStatus.state === "paused" ? "继续播放" : "播放";
+            form.appendChild(button);
+
+            shell.appendChild(main);
+            shell.appendChild(form);
+            article.appendChild(shell);
+            list.appendChild(article);
+          });
+
+          list.hidden = false;
+          empty.hidden = true;
+          emptyState.hidden = true;
+        };
+
+        const renderLibraryCollections = (librarySnapshot, playbackStatus) => {
+          renderVolumes(librarySnapshot);
+          renderDirectories(librarySnapshot);
+          renderAlbums(librarySnapshot);
+          renderTracks(librarySnapshot, playbackStatus);
+        };
+
+        const refreshLibraryView = async (reason, query = pageContext) => {
+          const nextQuery = normalizeLibraryQuery(query);
+          const [librarySnapshot, playbackStatus, queueSnapshot] = await Promise.all([
+            fetchJSON(buildLibrarySnapshotPath(nextQuery)),
+            fetchJSON(endpoints.playbackStatus),
+            fetchJSON(endpoints.playbackQueue)
+          ]);
+          setPageContext(librarySnapshot.query || nextQuery);
+          latestLibrarySnapshot = librarySnapshot;
+          refreshLibraryFocus(librarySnapshot);
+          refreshLibraryStatus(librarySnapshot);
+          renderLibraryCollections(librarySnapshot, playbackStatus);
+          refreshPlaybackBoundary(playbackStatus, queueSnapshot, librarySnapshot);
+          statusNode.innerHTML = `曲库页已通过 <code>/api/v1/...</code> 完成 ${reason} 同步。`;
+        };
+
+        const navigateLibraryQuery = async (query, reason, {historyMode = "push"} = {}) => {
+          const normalized = normalizeLibraryQuery(query);
+          if (historyMode === "push") {
+            window.history.pushState({libraryQuery: normalized}, "", buildLibraryURL(normalized));
+          } else if (historyMode === "replace") {
+            window.history.replaceState({libraryQuery: normalized}, "", buildLibraryURL(normalized));
+          }
+          setPageContext(normalized);
+          await refreshLibraryView(reason, normalized);
+        };
+
+        const schedulePlaybackRefresh = (label) => {
+          if (refreshPending) {
+            return;
+          }
+          refreshPending = true;
+          statusNode.textContent = `检测到播放事件 ${label}，正在刷新曲库页。`;
+          window.setTimeout(async () => {
+            try {
+              const [playbackStatus, queueSnapshot] = await Promise.all([
+                fetchJSON(endpoints.playbackStatus),
+                fetchJSON(endpoints.playbackQueue)
+              ]);
+              refreshPlaybackBoundary(playbackStatus, queueSnapshot, latestLibrarySnapshot);
+              statusNode.innerHTML = `曲库页已通过 <code>/api/v1/...</code> 响应 ${label}。`;
+            } catch (error) {
+              statusNode.textContent = `曲库页实时刷新失败：${error.message}。SSR 内容仍然可见。`;
+            } finally {
+              refreshPending = false;
+            }
+          }, 120);
+        };
+
+        document.addEventListener("submit", async (event) => {
+          const form = event.target;
+          if (!(form instanceof HTMLFormElement)) {
+            return;
+          }
+          if (form.getAttribute("action") !== "/library/commands") {
+            return;
+          }
+
+          const submitter = event.submitter;
+          const formData = new FormData(form);
+          const action = rawValue(submitter && "value" in submitter ? submitter.value : formData.get("action"));
+          if (!action) {
+            return;
+          }
+
+          event.preventDefault();
+
+          try {
+            const result = await postJSON(endpoints.libraryCommands, {
+              action,
+              track_id: rawValue(formData.get("track_id")),
+              query: {
+                album_uid: rawValue(formData.get("album_uid")),
+                directory_volume_uuid: rawValue(formData.get("volume_uuid")),
+                directory_path: rawValue(formData.get("directory"))
+              }
+            });
+            if (!latestLibrarySnapshot) {
+              latestLibrarySnapshot = await fetchJSON(buildLibrarySnapshotPath());
+              refreshLibraryFocus(latestLibrarySnapshot);
+              refreshLibraryStatus(latestLibrarySnapshot);
+            }
+            setPageContext(result.data.query || pageContext);
+            refreshLibraryFocus(latestLibrarySnapshot);
+            setCommandBanners(result.data.message, result.data.error);
+            refreshPlaybackBoundary(result.data.playback_status || {}, result.data.queue || {}, latestLibrarySnapshot);
+            statusNode.innerHTML = `曲库页已通过 <code>/api/v1/library/commands</code> 执行 ${action}。`;
+          } catch (error) {
+            setCommandBanners("", error.message);
+            statusNode.textContent = `曲库命令 API 失败：${error.message}。旧表单 fallback 仍保留。`;
+          }
+        });
+
+        document.addEventListener("click", async (event) => {
+          if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+            return;
+          }
+
+          const target = event.target;
+          if (!(target instanceof Element)) {
+            return;
+          }
+
+          const link = target.closest("a[href]");
+          if (!(link instanceof HTMLAnchorElement)) {
+            return;
+          }
+          if (link.target && link.target !== "_self") {
+            return;
+          }
+          if (link.hasAttribute("download")) {
+            return;
+          }
+
+          const nextURL = new URL(link.href, window.location.href);
+          if (nextURL.origin !== window.location.origin || nextURL.pathname !== "/library") {
+            return;
+          }
+
+          event.preventDefault();
+
+          try {
+            await navigateLibraryQuery(readLibraryQueryFromURL(nextURL), "browser-side browse navigation");
+          } catch (error) {
+            statusNode.textContent = `曲库浏览 API 失败：${error.message}。正在回退到整页导航。`;
+            window.location.assign(nextURL.toString());
+          }
+        });
+
+        const watchedEvents = [
+          "PLAYBACK_STARTED",
+          "PLAYBACK_PAUSED",
+          "PLAYBACK_RESUMED",
+          "PLAYBACK_STOPPED",
+          "TRACK_CHANGED",
+          "PLAYBACK_FAILED"
+        ];
+
+        watchedEvents.forEach((eventName) => {
+          stream.addEventListener(eventName, () => schedulePlaybackRefresh(eventName.toLowerCase()));
+        });
+
+        stream.addEventListener("STREAM_ERROR", () => {
+          refreshPending = false;
+          statusNode.textContent = "实时播放同步已断开，页面会自动重连。";
+        });
+
+        stream.onerror = () => {
+          refreshPending = false;
+          statusNode.textContent = "实时播放同步正在重连，手动控制仍然可用。";
+        };
+
+        window.addEventListener("popstate", async () => {
+          try {
+            await navigateLibraryQuery(readLibraryQueryFromURL(), "browser history navigation", {historyMode: "none"});
+          } catch (error) {
+            statusNode.textContent = `历史记录刷新失败：${error.message}。正在重新加载当前页面。`;
+            window.location.assign(window.location.href);
+          }
+        });
+
+        stream.onopen = async () => {
+          refreshPending = false;
+          try {
+            window.history.replaceState({libraryQuery: pageContext}, "", buildLibraryURL(pageContext));
+            await refreshLibraryView("初次加载", pageContext);
+          } catch (error) {
+            statusNode.textContent = `曲库页 API 初始化失败：${error.message}。SSR 内容仍然可见。`;
+          }
+        };
+      })();
+    </script>
   </body>
 </html>

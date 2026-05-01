@@ -8,7 +8,7 @@ Historical product-scope notes for the first APK MVP are archived in
 
 ## Current T4-Side Foundation
 
-The next rebuilt image is expected to include:
+当前 `v23` 之后的开发镜像与 live runtime-verified 配置已经包含：
 
 - `bluez`
 - `wpasupplicant`
@@ -19,15 +19,18 @@ The next rebuilt image is expected to include:
 - `/usr/bin/lumelo-wifi-apply`
 - `/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond`
 - `/etc/systemd/network/30-wireless-dhcp.network`
+- `/etc/systemd/system/bluetooth.service.d/30-lumelo-compat.conf`
 
-This foundation is enough to validate whether the NanoPC-T4 exposes a usable
-Bluetooth controller and Wi-Fi interface under the Lumelo rootfs.
+这套基础已经足以验证 `NanoPC-T4` 在当前 `Lumelo` rootfs 下是否暴露出可用的：
+
+- classic Bluetooth controller
+- Wi-Fi interface
 
 ## Provisioning User Flow
 
 1. T4 boots without known Wi-Fi credentials.
 2. T4 starts Bluetooth provisioning mode.
-3. Phone app discovers `Lumelo T4`.
+3. Phone app discovers `Lumelo T4` over classic Bluetooth.
 4. User pairs or connects over classic Bluetooth.
 5. Phone app sends SSID and password to the T4.
 6. T4 writes credentials and restarts Wi-Fi.
@@ -52,7 +55,7 @@ Bluetooth controller and Wi-Fi interface under the Lumelo rootfs.
 
 但上层业务语义继续沿用当前定义：
 
-- `device_info`: JSON with hostname, build id, and current IP state
+- `device_info`: JSON with hostname, build id, current IP state, and WebUI entry info
 - `wifi_credentials_encrypted`: encrypted credential payload carrying the same `ssid/password` semantics
 - `apply`: trigger that asks the T4 to apply the last credentials
 - `status`: JSON with `advertising`, `credentials_ready`, `applying`, `waiting_for_ip`, `connected`, or `failed`
@@ -63,6 +66,22 @@ Bluetooth controller and Wi-Fi interface under the Lumelo rootfs.
 - `{"type":"wifi_credentials_encrypted","payload":{...}}`
 - `{"type":"apply"}`
 - `{"type":"status"}`
+
+当前 WebUI entry 约定：
+
+- `hostname=lumelo`
+- default hostname URL: `http://lumelo.local/`
+- `web_port=80`
+- `web_url=http://<T4_IP>/`
+- `http://lumelo/` 不作为产品入口，不开发、不承诺、不验收；APK 和文档都不应引导用户使用这个单标签 hostname。
+
+APK entry selection contract：
+
+1. 蓝牙配网成功后，T4 继续返回 `hostname=lumelo`、`web_url=http://<T4_IP>/` 和 `web_port=80`。
+2. APK 在同一 Wi-Fi 上用短超时请求 `http://lumelo.local/healthz`，判断当前手机 / 当前网络 / 当前 resolver 是否支持 `.local`。
+3. probe 成功时，APK 默认打开 `http://lumelo.local/`。
+4. probe 失败时，APK 自动打开 `web_url`，也就是 `http://<T4_IP>/`。
+5. `NsdManager` / DNS-SD 后续可作为发现增强，但不能替代真实 `http://lumelo.local/healthz` probe。
 
 当前协议已经扩展为协商式安全传输：
 
@@ -128,6 +147,19 @@ That snapshot should now also carry:
 
 `/usr/bin/lumelo-bluetooth-provisioning-mode` 仍负责在服务启动前把控制器拉到
 经典蓝牙可发现 / 可连接状态。
+
+当前已验证的板端要求：
+
+- `bluetooth.service` 必须以 `bluetoothd -C` 启动
+  - 否则 `sdptool browse local / sdptool add SP` 的 compat SDP 路径不可用
+- `lumelo-bluetooth-provisioning-mode` 中的 `btmgmt` 必须在 pseudo-tty 中执行
+  - 当前实现使用 `script -q -c ... /dev/null`
+  - 裸跑 `btmgmt` 在 systemd/no-TTY 条件下已现场验证会挂住
+- `lumelo-wifi-provisiond.service` 与 `lumelo-bluetooth-provisioning.service`
+  必须绑定生命周期
+  - 避免 controller 仍 discoverable，但真正的 RFCOMM / SDP server 已经不在监听
+- daemon stop path 必须清理本次或 stale `SPP` SDP record
+  - 避免手机继续看到 stale service 而连接失败
 
 `/usr/bin/lumelo-wifi-apply` should no longer assume `wlan0`; it should prefer
 `LUMELO_WIFI_IFACE`, then `WIFI_INTERFACE`, then auto-detect the first wireless

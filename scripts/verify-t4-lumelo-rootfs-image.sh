@@ -261,11 +261,11 @@ expect_executable /usr/lib/systemd/systemd-resolved "systemd-resolved binary"
 expect_file /etc/systemd/network/20-wired-dhcp.network "wired DHCP"
 expect_text /etc/systemd/network/20-wired-dhcp.network "LinkLocalAddressing=no" "wired DHCP link-local policy"
 expect_text /etc/systemd/network/20-wired-dhcp.network "LLMNR=no" "wired DHCP LLMNR policy"
-expect_text /etc/systemd/network/20-wired-dhcp.network "MulticastDNS=no" "wired DHCP mDNS policy"
+expect_text /etc/systemd/network/20-wired-dhcp.network "MulticastDNS=yes" "wired DHCP mDNS policy"
 expect_text /etc/systemd/network/20-wired-dhcp.network "ClientIdentifier=mac" "wired DHCP client id"
 expect_text /etc/systemd/network/30-wireless-dhcp.network "LinkLocalAddressing=no" "wireless DHCP link-local policy"
 expect_text /etc/systemd/network/30-wireless-dhcp.network "LLMNR=no" "wireless DHCP LLMNR policy"
-expect_text /etc/systemd/network/30-wireless-dhcp.network "MulticastDNS=no" "wireless DHCP mDNS policy"
+expect_text /etc/systemd/network/30-wireless-dhcp.network "MulticastDNS=yes" "wireless DHCP mDNS policy"
 expect_file /etc/NetworkManager/NetworkManager.conf "NetworkManager baseline config"
 expect_text /etc/NetworkManager/NetworkManager.conf "plugins=ifupdown,keyfile" "NetworkManager plugin baseline"
 expect_file /etc/NetworkManager/conf.d/12-managed-wifi.conf "NetworkManager managed Wi-Fi policy"
@@ -277,8 +277,11 @@ expect_text /etc/NetworkManager/conf.d/disable-random-mac-during-wifi-scan.conf 
 expect_file /etc/network/interfaces "ifupdown base interfaces file"
 expect_text /etc/network/interfaces "source /etc/network/interfaces.d/*" "ifupdown include policy"
 expect_text /etc/systemd/resolved.conf.d/lumelo.conf "LLMNR=no" "resolved LLMNR policy"
-expect_text /etc/systemd/resolved.conf.d/lumelo.conf "MulticastDNS=no" "resolved mDNS policy"
-expect_text /etc/systemd/system/controld.service "CONTROLD_LISTEN_ADDR=0.0.0.0:18080" "controld bring-up listen address"
+expect_text /etc/systemd/resolved.conf.d/lumelo.conf "MulticastDNS=yes" "resolved mDNS policy"
+expect_file /etc/systemd/dnssd/lumelo-http.dnssd "Lumelo HTTP DNS-SD service"
+expect_text /etc/systemd/dnssd/lumelo-http.dnssd "Type=_http._tcp" "Lumelo HTTP DNS-SD type"
+expect_text /etc/systemd/dnssd/lumelo-http.dnssd "Port=80" "Lumelo HTTP DNS-SD port"
+expect_text /etc/systemd/system/controld.service "CONTROLD_LISTEN_ADDR=0.0.0.0:80" "controld bring-up listen address"
 expect_file /etc/systemd/system/local-mode.target "local-mode target"
 expect_text /etc/systemd/system/local-mode.target "media-indexd.service" "local-mode target media-index dependency"
 expect_file /etc/systemd/system/playbackd.service "playbackd unit"
@@ -290,6 +293,8 @@ expect_text /etc/systemd/system/bluetooth.service.d/10-lumelo-rfkill-unblock.con
 expect_file /etc/systemd/system/bluetooth.service.d/20-lumelo-uart-attach.conf "bluetooth UART attach drop-in"
 expect_text /etc/systemd/system/bluetooth.service.d/20-lumelo-uart-attach.conf "Requires=lumelo-bluetooth-uart-attach.service" "bluetooth UART attach dependency"
 expect_text /etc/systemd/system/bluetooth.service.d/20-lumelo-uart-attach.conf "After=lumelo-bluetooth-uart-attach.service" "bluetooth UART attach ordering"
+expect_file /etc/systemd/system/bluetooth.service.d/30-lumelo-compat.conf "bluetooth compat drop-in"
+expect_text /etc/systemd/system/bluetooth.service.d/30-lumelo-compat.conf "ExecStart=/usr/libexec/bluetooth/bluetoothd -C" "bluetooth compat ExecStart override"
 expect_file /etc/systemd/system/lumelo-bluetooth-uart-attach.service "Bluetooth UART attach unit"
 expect_executable /usr/libexec/lumelo/bluetooth-uart-attach "Bluetooth UART attach wrapper"
 expect_symlink /etc/systemd/system/multi-user.target.wants/local-mode.target "local-mode enablement"
@@ -341,6 +346,26 @@ fi
 
 if [ -x "${ROOTFS_MOUNT}/usr/bin/lumelo-bluetooth-provisioning-mode" ]; then
   pass "Bluetooth provisioning helper: /usr/bin/lumelo-bluetooth-provisioning-mode"
+  expect_text \
+    /usr/bin/lumelo-bluetooth-provisioning-mode \
+    'ACTION=${1:-enable}' \
+    "Bluetooth provisioning helper action selector"
+  expect_text \
+    /usr/bin/lumelo-bluetooth-provisioning-mode \
+    'btmgmt discov no' \
+    "Bluetooth provisioning helper disable path"
+  expect_text \
+    /usr/bin/lumelo-bluetooth-provisioning-mode \
+    'btmgmt pairable off' \
+    "Bluetooth provisioning helper pairable disable path"
+  expect_text \
+    /usr/bin/lumelo-bluetooth-provisioning-mode \
+    'btmgmt pairable on' \
+    "Bluetooth provisioning helper pairable enable path"
+  expect_text \
+    /usr/bin/lumelo-bluetooth-provisioning-mode \
+    'btmgmt discov yes 0' \
+    "Bluetooth provisioning helper discoverable enable path"
 else
   warn "Bluetooth provisioning helper not present; expected only in images rebuilt after 2026-04-08 02:55"
 fi
@@ -353,18 +378,46 @@ fi
 
 if [ -f "${ROOTFS_MOUNT}/etc/systemd/system/lumelo-bluetooth-provisioning.service" ]; then
   pass "Bluetooth provisioning unit: /etc/systemd/system/lumelo-bluetooth-provisioning.service"
+  expect_text \
+    /etc/systemd/system/lumelo-bluetooth-provisioning.service \
+    "PartOf=lumelo-wifi-provisiond.service" \
+    "Bluetooth provisioning lifecycle coupling"
+  expect_text \
+    /etc/systemd/system/lumelo-bluetooth-provisioning.service \
+    "ExecStop=/usr/bin/lumelo-bluetooth-provisioning-mode disable" \
+    "Bluetooth provisioning disable stop path"
 else
   warn "Bluetooth provisioning unit not present; expected only in images rebuilt after 2026-04-08 02:55"
 fi
 
 if [ -x "${ROOTFS_MOUNT}/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond" ]; then
   pass "Classic Bluetooth Wi-Fi provisioning daemon: /usr/libexec/lumelo/classic-bluetooth-wifi-provisiond"
+  expect_text \
+    /usr/libexec/lumelo/classic-bluetooth-wifi-provisiond \
+    "def cleanup_sdp_records_main():" \
+    "Classic provisioning SDP cleanup entrypoint"
+  expect_text \
+    /usr/libexec/lumelo/classic-bluetooth-wifi-provisiond \
+    "classic_bluetooth_socket_bind_failed" \
+    "Classic provisioning bind failure code"
+  expect_text \
+    /usr/libexec/lumelo/classic-bluetooth-wifi-provisiond \
+    "classic_bluetooth_sdp_registration_failed" \
+    "Classic provisioning SDP failure code"
 else
   warn "Classic Bluetooth Wi-Fi provisioning daemon not present; expected only in images rebuilt after 2026-04-12 16:30"
 fi
 
 if [ -f "${ROOTFS_MOUNT}/etc/systemd/system/lumelo-wifi-provisiond.service" ]; then
   pass "Bluetooth Wi-Fi provisioning unit: /etc/systemd/system/lumelo-wifi-provisiond.service"
+  expect_text \
+    /etc/systemd/system/lumelo-wifi-provisiond.service \
+    "BindsTo=lumelo-bluetooth-provisioning.service" \
+    "Classic provisioning service lifecycle binding"
+  expect_text \
+    /etc/systemd/system/lumelo-wifi-provisiond.service \
+    "ExecStopPost=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond --cleanup-sdp" \
+    "Classic provisioning SDP cleanup stop hook"
 else
   warn "Bluetooth Wi-Fi provisioning unit not present; expected only in images rebuilt after 2026-04-12 16:30"
 fi

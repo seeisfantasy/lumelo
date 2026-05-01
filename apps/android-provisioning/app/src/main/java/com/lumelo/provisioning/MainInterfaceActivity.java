@@ -1,19 +1,25 @@
 package com.lumelo.provisioning;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.ConnectivityManager;
-import android.net.LinkAddress;
-import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.ViewGroup;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -24,17 +30,16 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import java.net.Inet4Address;
-import java.net.InetAddress;
-import java.util.List;
-
 public class MainInterfaceActivity extends Activity {
+    private static final String TAG = "LumeloWebView";
     public static final String EXTRA_INITIAL_URL = "com.lumelo.provisioning.extra.INITIAL_URL";
+    public static final String EXTRA_EXPECTED_T4_SSID = "com.lumelo.provisioning.extra.EXPECTED_T4_SSID";
 
     private WebView webView;
     private TextView statusView;
     private String baseUrl = "";
     private String currentUrl = "";
+    private String expectedT4Ssid = "";
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -42,6 +47,7 @@ public class MainInterfaceActivity extends Activity {
     private boolean mainFrameRequestFailed;
     private boolean reloadScheduled;
     private String lastErrorDescription = "";
+    private OnBackInvokedCallback backInvokedCallback;
     private final Runnable failedNetworkPollRunnable = new Runnable() {
         @Override
         public void run() {
@@ -72,12 +78,14 @@ public class MainInterfaceActivity extends Activity {
         super.onCreate(savedInstanceState);
         String initialUrl = getIntent().getStringExtra(EXTRA_INITIAL_URL);
         if (initialUrl == null || initialUrl.isEmpty()) {
-            initialUrl = "http://127.0.0.1:18080/";
+            initialUrl = "http://127.0.0.1/";
         }
         baseUrl = normalizeBaseUrl(initialUrl);
         currentUrl = initialUrl;
+        expectedT4Ssid = normalizeSsid(getIntent().getStringExtra(EXTRA_EXPECTED_T4_SSID));
         connectivityManager = getSystemService(ConnectivityManager.class);
         buildUi();
+        registerBackNavigationCallback();
         registerNetworkCallback();
         loadUrl(initialUrl);
     }
@@ -86,6 +94,7 @@ public class MainInterfaceActivity extends Activity {
     protected void onDestroy() {
         handler.removeCallbacks(reloadRunnable);
         handler.removeCallbacks(failedNetworkPollRunnable);
+        unregisterBackNavigationCallback();
         unregisterNetworkCallback();
         if (webView != null) {
             webView.destroy();
@@ -104,12 +113,36 @@ public class MainInterfaceActivity extends Activity {
     }
 
     @Override
+    @SuppressLint("GestureBackNavigation")
     public void onBackPressed() {
+        handleBackNavigation();
+    }
+
+    private void handleBackNavigation() {
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
             return;
         }
         super.onBackPressed();
+    }
+
+    private void registerBackNavigationCallback() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        backInvokedCallback = this::handleBackNavigation;
+        getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                backInvokedCallback
+        );
+    }
+
+    private void unregisterBackNavigationCallback() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU || backInvokedCallback == null) {
+            return;
+        }
+        getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback);
+        backInvokedCallback = null;
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -128,22 +161,23 @@ public class MainInterfaceActivity extends Activity {
         root.addView(title, matchWrap());
 
         statusView = new TextView(this);
-        statusView.setText("Opening Lumelo main interface...");
+        statusView.setText("正在打开 Lumelo 主界面...");
         statusView.setTextSize(15);
         statusView.setTextColor(0xff6f675e);
         statusView.setPadding(0, dp(6), 0, dp(10));
         root.addView(statusView, matchWrap());
 
         LinearLayout primaryActions = actionRow();
-        primaryActions.addView(navButton("Home", "/"));
-        primaryActions.addView(navButton("Library", "/library"));
-        primaryActions.addView(navButton("Logs", "/logs"));
+        primaryActions.addView(navButton("首页", "/"));
+        primaryActions.addView(navButton("曲库", "/library"));
+        primaryActions.addView(navButton("日志", "/logs"));
         root.addView(primaryActions, matchWrap());
 
         LinearLayout secondaryActions = actionRow();
-        secondaryActions.addView(navButton("Provisioning", "/provisioning"));
-        secondaryActions.addView(actionButton("Browser", this::openInBrowser));
-        secondaryActions.addView(actionButton("Setup", this::finish));
+        secondaryActions.addView(navButton("设置", "/provisioning"));
+        secondaryActions.addView(actionButton("重试", this::retryCurrentUrl));
+        secondaryActions.addView(actionButton("浏览器", this::openInBrowser));
+        secondaryActions.addView(actionButton("返回", this::finish));
         root.addView(secondaryActions, matchWrap());
 
         webView = new WebView(this);
@@ -161,24 +195,20 @@ public class MainInterfaceActivity extends Activity {
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 currentUrl = url;
                 mainFrameRequestFailed = false;
-                statusView.setText("Loading " + url);
+                statusView.setText("正在打开 " + url);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 currentUrl = url;
                 if (mainFrameRequestFailed) {
-                    statusView.setText(
-                            "Main interface load failed: "
-                                    + lastErrorDescription
-                                    + ". The page will retry automatically after network changes."
-                    );
+                    statusView.setText(buildNetworkErrorMessage(currentUrl, lastErrorDescription));
                     return;
                 }
                 mainFrameLoadFailed = false;
                 lastErrorDescription = "";
                 handler.removeCallbacks(failedNetworkPollRunnable);
-                statusView.setText("Viewing " + url);
+                statusView.setText("当前页面 " + url);
             }
 
             @Override
@@ -250,6 +280,20 @@ public class MainInterfaceActivity extends Activity {
         startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(currentUrl)));
     }
 
+    private void retryCurrentUrl() {
+        if (currentUrl == null || currentUrl.isEmpty()) {
+            return;
+        }
+        reloadScheduled = false;
+        mainFrameRequestFailed = false;
+        handler.removeCallbacks(reloadRunnable);
+        handler.removeCallbacks(failedNetworkPollRunnable);
+        statusView.setText("正在重试 " + currentUrl + "...");
+        if (webView != null) {
+            webView.loadUrl(currentUrl);
+        }
+    }
+
     private String joinPath(String path) {
         String normalizedBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         if (path == null || path.isEmpty() || "/".equals(path)) {
@@ -294,7 +338,8 @@ public class MainInterfaceActivity extends Activity {
         };
         try {
             connectivityManager.registerDefaultNetworkCallback(networkCallback);
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException exception) {
+            Log.w(TAG, "Failed to register default network callback", exception);
             networkCallback = null;
         }
     }
@@ -305,8 +350,8 @@ public class MainInterfaceActivity extends Activity {
         }
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback);
-        } catch (RuntimeException ignored) {
-            // Ignore callback teardown races during activity shutdown.
+        } catch (RuntimeException exception) {
+            Log.w(TAG, "Failed to unregister default network callback", exception);
         }
         networkCallback = null;
     }
@@ -323,7 +368,7 @@ public class MainInterfaceActivity extends Activity {
             return;
         }
         reloadScheduled = true;
-        statusView.setText("Network changed. Retrying " + currentUrl + "...");
+        statusView.setText("网络已变化，正在重试 " + currentUrl + "...");
         handler.removeCallbacks(reloadRunnable);
         handler.postDelayed(reloadRunnable, 1200);
     }
@@ -335,44 +380,66 @@ public class MainInterfaceActivity extends Activity {
 
     private boolean canAttemptReload(String url) {
         String targetHost = extractHost(url);
-        String phoneIp = currentIpv4Address();
-        if (targetHost.isEmpty() || phoneIp.isEmpty()) {
+        Ipv4Network.AddressInfo phoneInfo = Ipv4Network.currentAddressInfo(connectivityManager);
+        if (targetHost.isEmpty() || phoneInfo == null) {
             return false;
         }
-        if (isPrivateIpv4(targetHost)) {
-            return sameSubnet(phoneIp, targetHost);
+        if (Ipv4Network.isPrivateIpv4(targetHost)) {
+            return Ipv4Network.sameSubnet(phoneInfo, targetHost);
         }
         return true;
     }
 
     private String buildNetworkErrorMessage(String url, String errorDescription) {
-        StringBuilder builder = new StringBuilder("Main interface load failed: ");
+        StringBuilder builder = new StringBuilder("主界面加载失败：");
         builder.append(errorDescription);
 
         String targetHost = extractHost(url);
-        String phoneIp = currentIpv4Address();
+        Ipv4Network.AddressInfo phoneInfo = Ipv4Network.currentAddressInfo(connectivityManager);
+        String currentWifiSsid = currentConnectedWifiSsid();
+        String currentWifiLabel = currentWifiSsid.isEmpty() ? "(unknown)" : currentWifiSsid;
+        if (!targetHost.isEmpty()) {
+            builder.append("\nT4 WebUI：").append(targetHost);
+        }
+        if (!expectedT4Ssid.isEmpty()) {
+            builder.append("\n上次确认的 T4 Wi-Fi：").append(expectedT4Ssid);
+        }
+        builder.append("\n手机当前 Wi-Fi：").append(currentWifiLabel);
         if (targetHost.isEmpty()) {
-            builder.append(". The page will retry automatically after network changes.");
+            builder.append("\n恢复建议：等待网络变化后的自动重试，或点击“重试”。");
             return builder.toString();
         }
 
-        if (phoneIp.isEmpty()) {
-            builder.append(". Phone currently has no active IPv4 network. The page will retry automatically after network changes.");
+        if (phoneInfo == null) {
+            builder.append("\n手机 IPv4：(none)");
+            builder.append("\n恢复建议：让这台手机重新连回 ");
+            if (!expectedT4Ssid.isEmpty()) {
+                builder.append(expectedT4Ssid);
+            } else {
+                builder.append("与 T4 相同的热点或路由器");
+            }
+            builder.append("，然后等待自动重试，或点击“重试”。");
             return builder.toString();
         }
 
-        if (isPrivateIpv4(targetHost) && !sameSubnet(phoneIp, targetHost)) {
-            builder.append(". Phone IP ");
-            builder.append(phoneIp);
-            builder.append(" is not on the same local subnet as T4 ");
+        builder.append("\n手机 IPv4：")
+                .append(phoneInfo.address)
+                .append("/")
+                .append(phoneInfo.prefixLength);
+
+        if (Ipv4Network.isPrivateIpv4(targetHost) && !Ipv4Network.sameSubnet(phoneInfo, targetHost)) {
+            builder.append("\n恢复建议：手机当前网络还不能直接访问 T4 ");
             builder.append(targetHost);
-            builder.append(". Switch the phone to the same hotspot or router; this page will retry automatically.");
+            if (!expectedT4Ssid.isEmpty()) {
+                builder.append("。请把手机切回 ").append(expectedT4Ssid);
+            } else {
+                builder.append("。请把手机切回与 T4 相同的热点或路由器");
+            }
+            builder.append("，然后等待自动重试，或点击“重试”。");
             return builder.toString();
         }
 
-        builder.append(". Phone IP ");
-        builder.append(phoneIp);
-        builder.append(" can see a network, so this page will retry automatically after connectivity changes.");
+        builder.append("\n恢复建议：手机网络看起来已经可达。等待自动重试，或点击“重试”。");
         return builder.toString();
     }
 
@@ -384,62 +451,33 @@ public class MainInterfaceActivity extends Activity {
         return uri.getHost() == null ? "" : uri.getHost();
     }
 
-    private String currentIpv4Address() {
-        if (connectivityManager == null) {
+    private String normalizeSsid(String value) {
+        if (value == null) {
             return "";
         }
-        Network activeNetwork = connectivityManager.getActiveNetwork();
-        if (activeNetwork == null) {
-            return "";
-        }
-        LinkProperties properties = connectivityManager.getLinkProperties(activeNetwork);
-        if (properties == null) {
-            return "";
-        }
-        List<LinkAddress> addresses = properties.getLinkAddresses();
-        if (addresses == null) {
-            return "";
-        }
-        for (LinkAddress address : addresses) {
-            InetAddress inetAddress = address.getAddress();
-            if (inetAddress instanceof Inet4Address && !inetAddress.isLoopbackAddress()) {
-                return inetAddress.getHostAddress();
-            }
-        }
-        return "";
+        return value.trim();
     }
 
-    private boolean isPrivateIpv4(String ip) {
-        if (ip.startsWith("10.")) {
-            return true;
+    private String currentConnectedWifiSsid() {
+        if (checkSelfPermission(Manifest.permission.ACCESS_WIFI_STATE) != PackageManager.PERMISSION_GRANTED) {
+            return "";
         }
-        if (ip.startsWith("192.168.")) {
-            return true;
+        WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifiManager == null) {
+            return "";
         }
-        if (!ip.startsWith("172.")) {
-            return false;
+        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+        if (wifiInfo == null) {
+            return "";
         }
-        String[] parts = ip.split("\\.");
-        if (parts.length < 2) {
-            return false;
+        String ssid = wifiInfo.getSSID();
+        if (ssid == null || ssid.isEmpty() || "<unknown ssid>".equalsIgnoreCase(ssid)) {
+            return "";
         }
-        try {
-            int secondOctet = Integer.parseInt(parts[1]);
-            return secondOctet >= 16 && secondOctet <= 31;
-        } catch (NumberFormatException ignored) {
-            return false;
+        if (ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+            return ssid.substring(1, ssid.length() - 1);
         }
-    }
-
-    private boolean sameSubnet(String left, String right) {
-        String[] leftParts = left.split("\\.");
-        String[] rightParts = right.split("\\.");
-        if (leftParts.length != 4 || rightParts.length != 4) {
-            return false;
-        }
-        return leftParts[0].equals(rightParts[0])
-                && leftParts[1].equals(rightParts[1])
-                && leftParts[2].equals(rightParts[2]);
+        return ssid;
     }
 
     private LinearLayout.LayoutParams matchWrap() {

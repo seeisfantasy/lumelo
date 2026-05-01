@@ -7,26 +7,30 @@ import (
 )
 
 type Snapshot struct {
-	Available      bool   `json:"available"`
-	State          string `json:"state,omitempty"`
-	Message        string `json:"message,omitempty"`
-	SSID           string `json:"ssid,omitempty"`
-	IP             string `json:"ip,omitempty"`
-	WiFiIP         string `json:"wifi_ip,omitempty"`
-	WiredIP        string `json:"wired_ip,omitempty"`
-	AllIPs         []string `json:"all_ips,omitempty"`
-	WebURL         string `json:"web_url,omitempty"`
-	Hostname       string `json:"hostname,omitempty"`
-	WiFiInterface  string `json:"wifi_interface,omitempty"`
-	WPAUnit        string `json:"wpa_unit,omitempty"`
-	StatusPath     string `json:"status_path,omitempty"`
-	UpdatedAt      string `json:"updated_at,omitempty"`
-	Error          string `json:"error,omitempty"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	ApplyOutput    string `json:"apply_output,omitempty"`
-	DiagnosticHint string `json:"diagnostic_hint,omitempty"`
-	IPWaitSeconds  int    `json:"ip_wait_seconds,omitempty"`
-	ReadError      string `json:"read_error,omitempty"`
+	Available        bool     `json:"available"`
+	State            string   `json:"state,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	SSID             string   `json:"ssid,omitempty"`
+	IP               string   `json:"ip,omitempty"`
+	WiFiIP           string   `json:"wifi_ip,omitempty"`
+	WiredIP          string   `json:"wired_ip,omitempty"`
+	AllIPs           []string `json:"all_ips,omitempty"`
+	WebURL           string   `json:"web_url,omitempty"`
+	Hostname         string   `json:"hostname,omitempty"`
+	WiFiInterface    string   `json:"wifi_interface,omitempty"`
+	WPAUnit          string   `json:"wpa_unit,omitempty"`
+	StatusPath       string   `json:"status_path,omitempty"`
+	UpdatedAt        string   `json:"updated_at,omitempty"`
+	Error            string   `json:"error,omitempty"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	ApplyOutput      string   `json:"apply_output,omitempty"`
+	DiagnosticHint   string   `json:"diagnostic_hint,omitempty"`
+	IPWaitSeconds    int      `json:"ip_wait_seconds,omitempty"`
+	BluetoothAlias   string   `json:"bluetooth_alias,omitempty"`
+	BluetoothAddress string   `json:"bluetooth_address,omitempty"`
+	RFCOMMChannel    int      `json:"rfcomm_channel,omitempty"`
+	SDPRecordHandles []string `json:"sdp_record_handles,omitempty"`
+	ReadError        string   `json:"read_error,omitempty"`
 }
 
 type Client struct {

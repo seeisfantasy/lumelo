@@ -1,31 +1,133 @@
 #!/bin/sh
 set -eu
 
-echo "Lumelo Bluetooth provisioning mode"
+ACTION=${1:-enable}
+ALIAS="Lumelo T4"
 
-if ! command -v bluetoothctl >/dev/null 2>&1; then
-  echo "bluetoothctl is unavailable; skipping Bluetooth provisioning mode" >&2
-  exit 0
-fi
+run_hciconfig() {
+  if ! command -v hciconfig >/dev/null 2>&1; then
+    return 0
+  fi
 
-if ! command -v rfkill >/dev/null 2>&1; then
-  echo "rfkill is unavailable; continuing without unblock step" >&2
-else
-  rfkill unblock bluetooth || true
-  rfkill unblock all || true
-fi
+  output=$("$@" 2>&1) || {
+    printf '%s\n' "${output}" >&2
+    exit 1
+  }
 
-if command -v hciconfig >/dev/null 2>&1; then
-  hciconfig hci0 up || true
-  hciconfig hci0 name "Lumelo T4" || true
-  hciconfig hci0 piscan || true
-fi
+  if [ -n "${output}" ]; then
+    printf '%s\n' "${output}"
+  fi
+}
 
-bluetoothctl <<'EOF' || true
+run_btmgmt() {
+  if ! command -v btmgmt >/dev/null 2>&1; then
+    return 0
+  fi
+
+  btmgmt_cmd=""
+  for arg in "$@"; do
+    escaped_arg=$(printf '%s' "${arg}" | sed "s/'/'\\\\''/g")
+    if [ -n "${btmgmt_cmd}" ]; then
+      btmgmt_cmd="${btmgmt_cmd} "
+    fi
+    btmgmt_cmd="${btmgmt_cmd}'${escaped_arg}'"
+  done
+
+  if command -v script >/dev/null 2>&1; then
+    output=$(script -q -c "${btmgmt_cmd}" /dev/null 2>&1) || {
+      printf '%s\n' "${output}" >&2
+      exit 1
+    }
+  else
+    output=$("$@" 2>&1) || {
+      printf '%s\n' "${output}" >&2
+      exit 1
+    }
+  fi
+
+  if [ -n "${output}" ]; then
+    printf '%s\n' "${output}"
+  fi
+}
+
+run_bluetoothctl_alias() {
+  output=$(bluetoothctl <<EOF
 power on
-system-alias Lumelo T4
-discoverable-timeout 0
-pairable on
-discoverable on
-show
+system-alias "${ALIAS}"
+quit
 EOF
+) || {
+    printf '%s\n' "${output}" >&2
+    exit 1
+  }
+
+  if [ -n "${output}" ]; then
+    printf '%s\n' "${output}"
+  fi
+}
+
+read_adapter_state() {
+  output=$(bluetoothctl show 2>&1) || {
+    printf '%s\n' "${output}" >&2
+    exit 1
+  }
+  printf '%s\n' "${output}"
+}
+
+ensure_markers() {
+  output=$1
+  shift
+  missing=""
+  normalized=$(printf '%s\n' "${output}" | tr '[:upper:]' '[:lower:]')
+  for marker in "$@"; do
+    if ! printf '%s\n' "${normalized}" | grep -Fq "${marker}"; then
+      if [ -n "${missing}" ]; then
+        missing="${missing}, "
+      fi
+      missing="${missing}${marker}"
+    fi
+  done
+
+  if [ -n "${missing}" ]; then
+    echo "bluetoothctl did not confirm adapter state: missing ${missing}" >&2
+    exit 1
+  fi
+}
+
+case "${ACTION}" in
+  enable)
+    echo "Lumelo Bluetooth provisioning mode: enable"
+
+    if command -v rfkill >/dev/null 2>&1; then
+      rfkill unblock bluetooth
+      rfkill unblock all
+    else
+      echo "rfkill is unavailable; continuing without unblock step" >&2
+    fi
+
+    run_hciconfig hciconfig hci0 up
+    run_hciconfig hciconfig hci0 name "${ALIAS}"
+    run_hciconfig hciconfig hci0 piscan
+
+    run_bluetoothctl_alias
+    run_btmgmt btmgmt connectable on
+    run_btmgmt btmgmt pairable on
+    run_btmgmt btmgmt discov yes 0
+
+    output=$(read_adapter_state)
+    ensure_markers "${output}" "powered: yes" "discoverable: yes" "pairable: yes"
+    ;;
+  disable)
+    echo "Lumelo Bluetooth provisioning mode: disable"
+
+    run_btmgmt btmgmt discov no
+    run_btmgmt btmgmt pairable off
+
+    output=$(read_adapter_state)
+    ensure_markers "${output}" "powered: yes" "discoverable: no" "pairable: no"
+    ;;
+  *)
+    echo "usage: $0 [enable|disable]" >&2
+    exit 2
+    ;;
+esac

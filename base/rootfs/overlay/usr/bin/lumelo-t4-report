@@ -135,6 +135,9 @@ emit_report() {
   cat_if_readable /etc/systemd/system/bluetooth.service.d/10-lumelo-rfkill-unblock.conf
   cat_if_readable /etc/systemd/system/bluetooth.service.d/20-lumelo-uart-attach.conf
   cat_if_readable /etc/systemd/system/lumelo-bluetooth-uart-attach.service
+  command_if_present hciconfig -a
+  command_if_present hcitool scan
+  command_if_present sdptool browse local
   if [ -d /lib/firmware/brcm ]; then
     run ls -l /lib/firmware/brcm
   fi
@@ -213,9 +216,9 @@ emit_report() {
   emit_dmesg_tail
 
   section "WebUI Loopback"
-  command_if_present curl -sS --max-time 2 http://127.0.0.1:18080/healthz
-  command_if_present curl -sS -I --max-time 2 http://127.0.0.1:18080/
-  command_if_present curl -sS --max-time 2 http://127.0.0.1:18080/
+  command_if_present curl -sS --max-time 2 http://127.0.0.1/healthz
+  command_if_present curl -sS -I --max-time 2 http://127.0.0.1/
+  command_if_present curl -sS --max-time 2 http://127.0.0.1/
 }
 
 if [ "${OUT}" = "-" ]; then

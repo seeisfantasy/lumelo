@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+dsd-reader = "0.3.1"
 ipc-proto = { path = "../ipc-proto" }
 media-model = { path = "../media-model" }
 rusqlite = { version = "0.32", features = ["bundled"] }

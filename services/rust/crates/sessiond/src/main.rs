@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -22,6 +23,10 @@ fn run() -> Result<(), String> {
     let quiet_flag = quiet_mode_flag_path_from_env();
     let protected_services = env::var("SESSIOND_PROTECTED_SERVICES").unwrap_or_default();
     let freezable_services = env::var("SESSIOND_FREEZABLE_SERVICES").unwrap_or_default();
+    let quiet_stop_units =
+        parse_service_list(&env::var("SESSIOND_QUIET_STOP_UNITS").unwrap_or_default());
+    let quiet_start_units =
+        parse_service_list(&env::var("SESSIOND_QUIET_START_UNITS").unwrap_or_default());
     let mut quiet_state = QuietModeState::Off;
 
     println!("sessiond watching");
@@ -35,11 +40,19 @@ fn run() -> Result<(), String> {
         "  freezable svc:  {}",
         printable_service_list(&freezable_services)
     );
+    println!("  quiet stop:     {}", printable_units(&quiet_stop_units));
+    println!("  quiet start:    {}", printable_units(&quiet_start_units));
 
     loop {
         match UnixStream::connect(&event_socket) {
             Ok(stream) => {
-                if let Err(err) = handle_stream(stream, &quiet_flag, &mut quiet_state) {
+                if let Err(err) = handle_stream(
+                    stream,
+                    &quiet_flag,
+                    &quiet_stop_units,
+                    &quiet_start_units,
+                    &mut quiet_state,
+                ) {
                     eprintln!("sessiond stream error: {err}");
                 }
             }
@@ -56,6 +69,22 @@ fn printable_service_list(raw: &str) -> String {
         "-".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn parse_service_list(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn printable_units(units: &[String]) -> String {
+    if units.is_empty() {
+        "-".to_string()
+    } else {
+        units.join(" ")
     }
 }
 
@@ -81,6 +110,8 @@ impl QuietModeState {
 fn handle_stream(
     stream: UnixStream,
     quiet_flag_path: &Path,
+    quiet_stop_units: &[String],
+    quiet_start_units: &[String],
     quiet_state: &mut QuietModeState,
 ) -> Result<(), String> {
     let mut reader = BufReader::new(stream);
@@ -102,7 +133,16 @@ fn handle_stream(
             }
         };
 
-        *quiet_state = next_quiet_state(*quiet_state, &event);
+        let previous_state = *quiet_state;
+        let next_state = next_quiet_state(*quiet_state, &event);
+        if quiet_service_mode(previous_state) != quiet_service_mode(next_state) {
+            reconcile_quiet_services(
+                quiet_service_mode(next_state),
+                quiet_stop_units,
+                quiet_start_units,
+            )?;
+        }
+        *quiet_state = next_state;
         reconcile_quiet_flag(*quiet_state, quiet_flag_path)?;
     }
 }
@@ -157,9 +197,45 @@ fn reconcile_quiet_flag(state: QuietModeState, quiet_flag_path: &Path) -> Result
     }
 }
 
+fn quiet_service_mode(state: QuietModeState) -> bool {
+    matches!(state, QuietModeState::Prepare | QuietModeState::Active)
+}
+
+fn reconcile_quiet_services(
+    quiet_active: bool,
+    quiet_stop_units: &[String],
+    quiet_start_units: &[String],
+) -> Result<(), String> {
+    if quiet_active {
+        run_systemctl("stop", quiet_stop_units)
+    } else {
+        run_systemctl("start", quiet_start_units)
+    }
+}
+
+fn run_systemctl(action: &str, units: &[String]) -> Result<(), String> {
+    if units.is_empty() {
+        return Ok(());
+    }
+
+    let status = Command::new("systemctl")
+        .arg(action)
+        .args(units)
+        .status()
+        .map_err(|err| format!("systemctl {action} {}: {err}", units.join(" ")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "systemctl {action} {} exited with {status}",
+            units.join(" ")
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{next_quiet_state, QuietModeState};
+    use super::{next_quiet_state, parse_service_list, quiet_service_mode, QuietModeState};
     use ipc_proto::{PlaybackEvent, PlaybackFailureClass};
 
     #[test]
@@ -199,5 +275,36 @@ mod tests {
         );
 
         assert_eq!(state, QuietModeState::Off);
+    }
+
+    #[test]
+    fn playback_failure_restores_quiet_service_mode() {
+        let state = next_quiet_state(
+            QuietModeState::Active,
+            &PlaybackEvent::PlaybackFailed {
+                reason: "alsa_open_failed".to_string(),
+                class: PlaybackFailureClass::Output,
+                recoverable: false,
+                keep_quiet: false,
+            },
+        );
+
+        assert!(!quiet_service_mode(state));
+    }
+
+    #[test]
+    fn error_hold_does_not_keep_quiet_service_mode() {
+        assert!(!quiet_service_mode(QuietModeState::ErrorHold));
+    }
+
+    #[test]
+    fn parses_service_lists_from_env_string() {
+        assert_eq!(
+            parse_service_list("bluetooth.service lumelo-wifi-provisiond.service"),
+            vec![
+                "bluetooth.service".to_string(),
+                "lumelo-wifi-provisiond.service".to_string()
+            ]
+        );
     }
 }

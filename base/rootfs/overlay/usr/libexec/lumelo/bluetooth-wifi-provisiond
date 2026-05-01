@@ -199,7 +199,7 @@ def build_status_payload(
         "message": message,
         "ssid": ssid,
         "ip": ip,
-        "web_url": f"http://{ip}:18080/" if ip else "",
+        "web_url": f"http://{ip}/" if ip else "",
         "hostname": socket.gethostname(),
         "wifi_interface": wifi_interface,
         "wpa_unit": wpa_unit_name(wifi_interface),
@@ -362,7 +362,7 @@ class DeviceInfoCharacteristic(Characteristic):
             "ip": ip,
             "wifi_interface": wifi_interface,
             "status_path": provisioning_status_path(),
-            "web_port": 18080,
+            "web_port": 80,
         }
         return bytes_for_text(json.dumps(payload, separators=(",", ":")))
 

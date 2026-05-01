@@ -19,7 +19,9 @@ pub enum PlaybackCommand {
     Ping,
     Status,
     QueueSnapshot,
+    HistorySnapshot,
     Play(String),
+    QueuePlay(Vec<String>),
     QueueAppend(String),
     QueueInsertNext(String),
     QueueRemove(String),
@@ -38,7 +40,13 @@ impl PlaybackCommand {
             Self::Ping => "PING".to_string(),
             Self::Status => "STATUS".to_string(),
             Self::QueueSnapshot => "QUEUE_SNAPSHOT".to_string(),
+            Self::HistorySnapshot => "HISTORY_SNAPSHOT".to_string(),
             Self::Play(track_id) => format!("PLAY {track_id}"),
+            Self::QueuePlay(track_ids) => format!(
+                "QUEUE_PLAY {}",
+                serde_json::to_string(track_ids)
+                    .expect("queue play track ids must serialize as JSON")
+            ),
             Self::QueueAppend(track_id) => format!("QUEUE_APPEND {track_id}"),
             Self::QueueInsertNext(track_id) => format!("QUEUE_INSERT_NEXT {track_id}"),
             Self::QueueRemove(queue_entry_id) => format!("QUEUE_REMOVE {queue_entry_id}"),
@@ -191,6 +199,21 @@ pub struct QueueSnapshotEntryView {
     pub is_current: bool,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HistorySnapshotView {
+    pub entries: Vec<HistorySnapshotEntryView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HistorySnapshotEntryView {
+    pub played_at: u64,
+    pub track_uid: String,
+    pub volume_uuid: String,
+    pub relative_path: String,
+    pub title: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
 impl Default for PlaybackStatusSnapshot {
     fn default() -> Self {
         Self {
@@ -289,12 +312,14 @@ pub fn parse_command_line(line: &str) -> Result<PlaybackCommand, ProtocolError> 
         "PING" => Ok(PlaybackCommand::Ping),
         "STATUS" => Ok(PlaybackCommand::Status),
         "QUEUE_SNAPSHOT" => Ok(PlaybackCommand::QueueSnapshot),
+        "HISTORY_SNAPSHOT" => Ok(PlaybackCommand::HistorySnapshot),
         "QUEUE_CLEAR" => Ok(PlaybackCommand::QueueClear),
         "PAUSE" => Ok(PlaybackCommand::Pause),
         "STOP" => Ok(PlaybackCommand::Stop),
         "NEXT" => Ok(PlaybackCommand::Next),
         "PREV" => Ok(PlaybackCommand::Prev),
         "PLAY" => parse_track_command(payload).map(PlaybackCommand::Play),
+        "QUEUE_PLAY" => parse_track_list_command(payload).map(PlaybackCommand::QueuePlay),
         "QUEUE_APPEND" => parse_track_command(payload).map(PlaybackCommand::QueueAppend),
         "QUEUE_INSERT_NEXT" => parse_track_command(payload).map(PlaybackCommand::QueueInsertNext),
         "QUEUE_REMOVE" => parse_queue_entry_command(payload).map(PlaybackCommand::QueueRemove),
@@ -332,6 +357,14 @@ pub fn format_queue_snapshot_line(snapshot: &QueueSnapshotView) -> String {
     let payload = serde_json::to_string(snapshot).expect("queue snapshot must serialize");
     format!(
         "OK\tkind=queue_snapshot\tpayload={}",
+        sanitize_field_value(&payload)
+    )
+}
+
+pub fn format_history_snapshot_line(snapshot: &HistorySnapshotView) -> String {
+    let payload = serde_json::to_string(snapshot).expect("history snapshot must serialize");
+    format!(
+        "OK\tkind=history_snapshot\tpayload={}",
         sanitize_field_value(&payload)
     )
 }
@@ -451,6 +484,35 @@ pub fn parse_queue_snapshot_line(line: &str) -> Result<QueueSnapshotView, Protoc
         ProtocolError::new(
             "invalid_queue_snapshot",
             format!("queue snapshot payload is invalid JSON: {err}"),
+        )
+    })
+}
+
+pub fn parse_history_snapshot_line(line: &str) -> Result<HistorySnapshotView, ProtocolError> {
+    let (kind, fields) = parse_response_line(line)?;
+    if kind != "OK" {
+        return Err(ProtocolError::new(
+            "unexpected_response",
+            "response is not OK",
+        ));
+    }
+
+    let response_kind = fields
+        .iter()
+        .find_map(|(key, value)| (*key == "kind").then_some(*value))
+        .ok_or_else(|| ProtocolError::new("missing_field", "missing kind field"))?;
+    if response_kind != "history_snapshot" {
+        return Err(ProtocolError::new(
+            "unexpected_response",
+            format!("expected history_snapshot response, got {response_kind}"),
+        ));
+    }
+
+    let payload = require_field(&fields, "payload")?;
+    serde_json::from_str(payload).map_err(|err| {
+        ProtocolError::new(
+            "invalid_history_snapshot",
+            format!("history snapshot payload is invalid JSON: {err}"),
         )
     })
 }
@@ -655,10 +717,11 @@ fn socket_filename(default_path: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_event_line, format_queue_snapshot_line, format_status_line, parse_command_line,
-        parse_event_line, parse_queue_snapshot_line, parse_status_line, PlaybackCommand,
-        PlaybackEvent, PlaybackFailureClass, PlaybackState, PlaybackStatusSnapshot,
-        QueueSnapshotEntryView, QueueSnapshotView,
+        format_event_line, format_history_snapshot_line, format_queue_snapshot_line,
+        format_status_line, parse_command_line, parse_event_line, parse_history_snapshot_line,
+        parse_queue_snapshot_line, parse_status_line, HistorySnapshotEntryView,
+        HistorySnapshotView, PlaybackCommand, PlaybackEvent, PlaybackFailureClass, PlaybackState,
+        PlaybackStatusSnapshot, QueueSnapshotEntryView, QueueSnapshotView,
     };
 
     #[test]
@@ -686,8 +749,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_queue_play_json_payload() {
+        let parsed = parse_command_line(
+            r#"QUEUE_PLAY ["Album Side A / Track 01","Album Side B / Track 02"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            PlaybackCommand::QueuePlay(vec![
+                "Album Side A / Track 01".to_string(),
+                "Album Side B / Track 02".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_history_snapshot_command() {
+        let parsed = parse_command_line("HISTORY_SNAPSHOT").unwrap();
+
+        assert_eq!(parsed, PlaybackCommand::HistorySnapshot);
+    }
+
+    #[test]
     fn queue_replace_encode_round_trips_json() {
         let original = PlaybackCommand::QueueReplace(vec![
+            "Album Side A / Track 01".to_string(),
+            "Album Side B / Track 02".to_string(),
+        ]);
+
+        let encoded = original.encode();
+        let decoded = parse_command_line(&encoded).unwrap();
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn queue_play_encode_round_trips_json() {
+        let original = PlaybackCommand::QueuePlay(vec![
             "Album Side A / Track 01".to_string(),
             "Album Side B / Track 02".to_string(),
         ]);
@@ -747,6 +845,25 @@ mod tests {
 
         let encoded = format_queue_snapshot_line(&original);
         let decoded = parse_queue_snapshot_line(&encoded).unwrap();
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn history_snapshot_round_trip_preserves_fields() {
+        let original = HistorySnapshotView {
+            entries: vec![HistorySnapshotEntryView {
+                played_at: 123,
+                track_uid: "track-a".to_string(),
+                volume_uuid: "vol-1".to_string(),
+                relative_path: "Album/track-a.flac".to_string(),
+                title: Some("Track A".to_string()),
+                duration_ms: Some(201_000),
+            }],
+        };
+
+        let encoded = format_history_snapshot_line(&original);
+        let decoded = parse_history_snapshot_line(&encoded).unwrap();
 
         assert_eq!(decoded, original);
     }

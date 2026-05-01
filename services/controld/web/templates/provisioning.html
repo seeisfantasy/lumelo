@@ -1,134 +1,236 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Lumelo provisioning</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    <title>Lumelo 设置</title>
+    {{if .InlineCSS}}<style>{{.InlineCSS}}</style>{{else}}<link rel="stylesheet" href="/static/css/app.css">{{end}}
   </head>
-  <body>
-    <main class="shell">
+  <body class="app-body">
+    <main class="shell shell-diagnostics">
       <nav class="topnav">
-        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
-        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
-        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
-        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+        <div class="topnav-brand">
+          <p class="eyebrow">设置</p>
+          <p class="topnav-title">网络与设备</p>
+          <p class="topnav-copy">
+            把网络状态、设备入口和最近一次联网结果集中放在这里。
+          </p>
+        </div>
+        <div class="topnav-links">
+          <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">首页</a>
+          <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">曲库</a>
+          <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">设置</a>
+          <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">日志</a>
+        </div>
       </nav>
 
-      <section class="card">
-        <p class="eyebrow">Lumelo bring-up</p>
-        <h1>Provisioning status</h1>
+      <section class="card page-hero page-main">
+        <p class="eyebrow">设置</p>
+        <h1>网络与设备</h1>
         <p class="summary">
-          This page shows the last BLE to Wi-Fi provisioning state written by
-          the T4 helper so bring-up can be inspected without opening a shell.
+          这里先展示 T4 最近一次联网状态，方便不进 shell 也能先确认网络和入口是否正常。
         </p>
         <p class="summary">
-          While bring-up is in progress, this page auto-refreshes when the
-          provisioning status file changes.
+          调试过程中，只要状态文件变化，这页就会自动刷新。
         </p>
-      </section>
-
-      <section class="card" data-provisioning-updated-at="{{.Provisioning.UpdatedAt}}">
-        <h2>Current State</h2>
-        {{if .Provisioning.Available}}
-          <p class="status-line">
-            Status:
-            {{if eq .Provisioning.State "connected"}}
-              <span class="pill pill-ok">connected</span>
-            {{else if eq .Provisioning.State "failed"}}
-              <span class="pill pill-offline">failed</span>
-            {{else}}
-              <span class="pill pill-current">{{if .Provisioning.State}}{{.Provisioning.State}}{{else}}unknown{{end}}</span>
-            {{end}}
-          </p>
-        {{else}}
-          <p class="status-line">
-            Status:
-            <span class="pill pill-offline">unavailable</span>
-          </p>
-        {{end}}
-
-        <dl class="grid">
-          <div>
-            <dt>Message</dt>
-            <dd>{{if .Provisioning.Message}}{{.Provisioning.Message}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>SSID</dt>
-            <dd>{{if .Provisioning.SSID}}{{.Provisioning.SSID}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>IP</dt>
-            <dd>{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Wi-Fi IP</dt>
-            <dd>{{if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Wired IP</dt>
-            <dd>{{if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>All IPs</dt>
-            <dd>{{if .Provisioning.AllIPs}}{{range $index, $ip := .Provisioning.AllIPs}}{{if $index}}, {{end}}{{$ip}}{{end}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>WebUI</dt>
-            <dd>{{if .Provisioning.WebURL}}<a href="{{.Provisioning.WebURL}}">{{.Provisioning.WebURL}}</a>{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Wi-Fi interface</dt>
-            <dd>{{if .Provisioning.WiFiInterface}}{{.Provisioning.WiFiInterface}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>WPA unit</dt>
-            <dd>{{if .Provisioning.WPAUnit}}{{.Provisioning.WPAUnit}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Hostname</dt>
-            <dd>{{if .Provisioning.Hostname}}{{.Provisioning.Hostname}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Updated at</dt>
-            <dd>{{if .Provisioning.UpdatedAt}}{{.Provisioning.UpdatedAt}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Status file</dt>
-            <dd>{{if .Provisioning.StatusPath}}{{.Provisioning.StatusPath}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Error code</dt>
-            <dd>{{if .Provisioning.ErrorCode}}{{.Provisioning.ErrorCode}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>DHCP wait window</dt>
-            <dd>{{if .Provisioning.IPWaitSeconds}}{{.Provisioning.IPWaitSeconds}} seconds{{else}}-{{end}}</dd>
-          </div>
-        </dl>
-
-        {{if .Provisioning.Error}}
-          <p class="banner banner-error">Provisioning error: {{.Provisioning.Error}}</p>
-        {{end}}
-        {{if .Provisioning.ReadError}}
-          <p class="banner banner-error">Status read error: {{.Provisioning.ReadError}}</p>
-        {{end}}
-        {{if .Provisioning.ApplyOutput}}
-          <p class="summary">Apply output: {{.Provisioning.ApplyOutput}}</p>
-        {{end}}
-        {{if .Provisioning.DiagnosticHint}}
-          <p class="summary">Diagnostic hint: {{.Provisioning.DiagnosticHint}}</p>
-        {{end}}
-
-        <div class="actions log-actions">
-          <a href="/provisioning-status" class="button-link">Open JSON</a>
-          <a href="/healthz" class="button-link button-link-secondary">Healthz</a>
-          <a href="/logs?lines=300" class="button-link button-link-secondary">Logs</a>
+        <div class="actions hero-actions">
+          <a href="/provisioning-status" class="button-link">查看状态 JSON</a>
+          <a href="/healthz" class="button-link button-link-secondary">查看健康状态</a>
+          <a href="/logs?lines=300" class="button-link button-link-secondary">查看日志</a>
         </div>
       </section>
 
-      <section class="card">
-        <h2>Raw JSON</h2>
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">设备</p>
+            <h2>音频输出</h2>
+          </div>
+          <p class="summary section-summary">
+            当前解码器状态来自 ALSA 声卡枚举。
+          </p>
+        </div>
+        <div class="settings-field">
+          <label class="settings-label" for="audio-output-select">当前解码器</label>
+          <select id="audio-output-select" class="settings-select" disabled>
+            {{if .AudioOutput.Connected}}
+              <option selected>{{.AudioOutput.Current.Name}}</option>
+            {{else}}
+              <option selected>未连接</option>
+            {{end}}
+          </select>
+          {{if .AudioOutput.Connected}}
+            <p class="overview-meta">
+              ALSA：{{.AudioOutput.Current.ALSADevice}}
+            </p>
+          {{else if .AudioOutput.ReadError}}
+            <p class="overview-meta">
+              状态读取失败：{{.AudioOutput.ReadError}}
+            </p>
+          {{else}}
+            <p class="overview-meta">
+              未发现 USB Audio 解码器。
+            </p>
+          {{end}}
+        </div>
+      </section>
+
+      <section class="card page-main" data-provisioning-updated-at="{{.Provisioning.UpdatedAt}}">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">概览</p>
+            <h2>联网摘要</h2>
+          </div>
+          <p class="summary section-summary">
+            先把当前联网姿态展示清楚，再把原始状态负载留给下面做精确调试。
+          </p>
+        </div>
+        <div class="overview-grid">
+          <article class="overview-tile">
+            <p class="overview-label">状态</p>
+            <p class="overview-value">{{provisioningStateLabel .Provisioning.State .Provisioning.Available}}</p>
+            <p class="overview-meta">最近一次联网状态回报</p>
+          </article>
+          <article class="overview-tile">
+            <p class="overview-label">SSID</p>
+            <p class="overview-value">{{if .Provisioning.SSID}}{{.Provisioning.SSID}}{{else}}-{{end}}</p>
+            <p class="overview-meta">当前无线网络目标</p>
+          </article>
+          <article class="overview-tile">
+            <p class="overview-label">IP</p>
+            <p class="overview-value">{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</p>
+            <p class="overview-meta">最近一次可达地址</p>
+          </article>
+          <article class="overview-tile">
+            <p class="overview-label">接口</p>
+            <p class="overview-value">{{if .Provisioning.WiFiInterface}}{{.Provisioning.WiFiInterface}}{{else}}-{{end}}</p>
+            <p class="overview-meta">当前无线接口</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">细节</p>
+            <h2>当前网络状态</h2>
+          </div>
+          <p class="summary section-summary">
+            让关键字段保持可读，但不要把整页做成原始状态转储。
+          </p>
+        </div>
+        {{if .Provisioning.Available}}
+          <p class="status-line">
+            状态：
+            <span class="pill {{if eq .Provisioning.State "connected"}}pill-ok{{else if eq .Provisioning.State "failed"}}pill-offline{{else}}pill-current{{end}}">
+              {{provisioningStateLabel .Provisioning.State .Provisioning.Available}}
+            </span>
+          </p>
+        {{else}}
+          <p class="status-line">
+            状态：
+            <span class="pill pill-offline">不可用</span>
+          </p>
+        {{end}}
+
+        <div class="diagnostic-layout">
+          <dl class="grid grid-compact">
+            <div>
+              <dt>说明</dt>
+              <dd>{{if .Provisioning.Message}}{{.Provisioning.Message}}{{else}}-{{end}}</dd>
+            </div>
+            <div>
+              <dt>WebUI 地址</dt>
+              <dd>{{if .Provisioning.WebURL}}<a href="{{.Provisioning.WebURL}}">{{.Provisioning.WebURL}}</a>{{else}}-{{end}}</dd>
+            </div>
+            <div>
+              <dt>IP</dt>
+              <dd>{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
+            </div>
+            <div>
+              <dt>全部 IP</dt>
+              <dd>{{if .Provisioning.AllIPs}}{{range $index, $ip := .Provisioning.AllIPs}}{{if $index}}, {{end}}{{$ip}}{{end}}{{else}}-{{end}}</dd>
+            </div>
+            <div>
+              <dt>主机名</dt>
+              <dd>{{if .Provisioning.Hostname}}{{.Provisioning.Hostname}}{{else}}-{{end}}</dd>
+            </div>
+              <div>
+                <dt>错误码</dt>
+                <dd>{{if .Provisioning.ErrorCode}}{{.Provisioning.ErrorCode}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>蓝牙别名</dt>
+                <dd>{{if .Provisioning.BluetoothAlias}}{{.Provisioning.BluetoothAlias}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>蓝牙地址</dt>
+                <dd>{{if .Provisioning.BluetoothAddress}}{{.Provisioning.BluetoothAddress}}{{else}}-{{end}}</dd>
+              </div>
+            </dl>
+          <div class="diagnostic-subcard">
+            <p class="eyebrow">联网路径</p>
+            <dl class="grid grid-compact">
+              <div>
+                <dt>Wi-Fi 地址</dt>
+                <dd>{{if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>有线地址</dt>
+                <dd>{{if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>WPA 服务</dt>
+                <dd>{{if .Provisioning.WPAUnit}}{{.Provisioning.WPAUnit}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>更新时间</dt>
+                <dd>{{if .Provisioning.UpdatedAt}}{{.Provisioning.UpdatedAt}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>状态文件</dt>
+                <dd>{{if .Provisioning.StatusPath}}{{.Provisioning.StatusPath}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>DHCP 等待窗口</dt>
+                <dd>{{if .Provisioning.IPWaitSeconds}}{{.Provisioning.IPWaitSeconds}} 秒{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>RFCOMM 通道</dt>
+                <dd>{{if .Provisioning.RFCOMMChannel}}{{.Provisioning.RFCOMMChannel}}{{else}}-{{end}}</dd>
+              </div>
+              <div>
+                <dt>SDP 记录</dt>
+                <dd>{{if .Provisioning.SDPRecordHandles}}{{range $index, $handle := .Provisioning.SDPRecordHandles}}{{if $index}}, {{end}}{{$handle}}{{end}}{{else}}-{{end}}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+
+        {{if .Provisioning.Error}}
+          <p class="banner banner-error">联网错误：{{.Provisioning.Error}}</p>
+        {{end}}
+        {{if .Provisioning.ReadError}}
+          <p class="banner banner-error">状态读取失败：{{.Provisioning.ReadError}}</p>
+        {{end}}
+        {{if .Provisioning.ApplyOutput}}
+          <p class="summary">应用输出：{{.Provisioning.ApplyOutput}}</p>
+        {{end}}
+        {{if .Provisioning.DiagnosticHint}}
+          <p class="summary">诊断提示：{{.Provisioning.DiagnosticHint}}</p>
+        {{end}}
+      </section>
+
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">负载</p>
+            <h2>状态 JSON</h2>
+          </div>
+          <p class="summary section-summary">
+            上面的卡片负责快速阅读，下面继续保留可直接复制的原始状态负载。
+          </p>
+        </div>
         <pre class="log-output">{{.RawJSON}}</pre>
       </section>
     </main>

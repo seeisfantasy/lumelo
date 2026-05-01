@@ -1,3 +1,4 @@
+use dsd_reader::DsdReader;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,8 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ipc_proto::{
     command_socket_path_from_env, event_socket_path_from_env, format_ack_line, format_error_line,
-    format_event_line, format_queue_snapshot_line, format_status_line, history_state_path_from_env,
-    parse_command_line, queue_state_path_from_env, state_dir_path, PlaybackCommand, PlaybackEvent,
+    format_event_line, format_history_snapshot_line, format_queue_snapshot_line,
+    format_status_line, history_state_path_from_env, parse_command_line, queue_state_path_from_env,
+    state_dir_path, HistorySnapshotEntryView, HistorySnapshotView, PlaybackCommand, PlaybackEvent,
     PlaybackFailureClass, PlaybackState, PlaybackStatusSnapshot, QueueSnapshotEntryView,
     QueueSnapshotView,
 };
@@ -31,7 +33,15 @@ const QUEUE_FILE_VERSION: u32 = 1;
 const HISTORY_FILE_VERSION: u32 = 1;
 const HISTORY_LIMIT: usize = 100;
 const LIBRARY_DB_FILENAME: &str = "library.db";
-const DEFAULT_AUDIO_DEVICE: &str = "default";
+const DEFAULT_ALSA_CARDS_PATH: &str = "/proc/asound/cards";
+const DEFAULT_CONFIG_PATH: &str = "/etc/lumelo/config.toml";
+const ALLOW_ABSOLUTE_PATHS_ENV: &str = "LUMELO_PLAYBACK_ALLOW_ABSOLUTE_PATHS";
+const AUDIO_DEVICE_ENV: &str = "LUMELO_AUDIO_DEVICE";
+const ALSA_CARDS_PATH_ENV: &str = "LUMELO_ALSA_CARDS_PATH";
+const DEFAULT_DSD_POLICY: DsdOutputPolicy = DsdOutputPolicy::NativeDsd;
+const DSD64_RATE_HZ: u32 = 2_822_400;
+const DSD_SILENCE_BYTE: u8 = 0x69;
+const DSD_PCM_FALLBACK_RATE_HZ: u32 = 44_100;
 
 fn main() {
     if let Err(err) = run() {
@@ -45,9 +55,12 @@ fn run() -> Result<(), String> {
     let event_socket = event_socket_path_from_env();
     let queue_path = Arc::new(queue_state_path_from_env());
     let history_path = Arc::new(history_state_path_from_env());
+    let dsd_policy = load_dsd_output_policy();
     let track_resolver = TrackResolver::new(state_dir_path().join(LIBRARY_DB_FILENAME));
     let output_controller = OutputController::new(
-        std::env::var("LUMELO_AUDIO_DEVICE").unwrap_or_else(|_| DEFAULT_AUDIO_DEVICE.to_string()),
+        configured_audio_device_from_env(),
+        alsa_cards_path_from_env(),
+        dsd_policy,
     );
 
     prepare_socket_path(&command_socket)?;
@@ -64,7 +77,16 @@ fn run() -> Result<(), String> {
     println!("  queue state:    {}", queue_path.display());
     println!("  history state:  {}", history_path.display());
     println!("  library db:     {}", track_resolver.db_path.display());
+    println!(
+        "  absolute paths: {}",
+        if track_resolver.allows_absolute_paths() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!("  audio device:   {}", output_controller.device_label());
+    println!("  dsd policy:     {}", output_controller.dsd_policy_label());
 
     for stream in listener.incoming() {
         match stream {
@@ -147,15 +169,167 @@ struct DecodedPCMConfig {
     channels: usize,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DsdOutputPolicy {
+    NativeDsd,
+    Dop,
+}
+
+impl DsdOutputPolicy {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "native_dsd" | "strict_native" | "native_dop" => Some(Self::NativeDsd),
+            "dop" => Some(Self::Dop),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeDsd => "native_dsd",
+            Self::Dop => "dop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DsdTransport {
+    Native(AlsaDsdFormat),
+    Dop(DopPcmFormat),
+    Pcm,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum AlsaDsdFormat {
+    U8,
+    U16Le,
+    U16Be,
+    U32Le,
+    U32Be,
+}
+
+impl AlsaDsdFormat {
+    fn aplay_format(self) -> &'static str {
+        match self {
+            Self::U8 => "DSD_U8",
+            Self::U16Le => "DSD_U16_LE",
+            Self::U16Be => "DSD_U16_BE",
+            Self::U32Le => "DSD_U32_LE",
+            Self::U32Be => "DSD_U32_BE",
+        }
+    }
+
+    fn sample_rate_divisor(self) -> u32 {
+        match self {
+            Self::U8 => 8,
+            Self::U16Le | Self::U16Be => 16,
+            Self::U32Le | Self::U32Be => 32,
+        }
+    }
+
+    fn push_dsd_byte(self, byte: u8, out: &mut Vec<u8>) {
+        match self {
+            Self::U8 => out.push(byte),
+            Self::U16Le => out.extend_from_slice(&[byte, 0x00]),
+            Self::U16Be => out.extend_from_slice(&[0x00, byte]),
+            Self::U32Le => out.extend_from_slice(&[byte, 0x00, 0x00, 0x00]),
+            Self::U32Be => out.extend_from_slice(&[0x00, 0x00, 0x00, byte]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DopPcmFormat {
+    S32Le,
+    S24Le,
+    S24_3Le,
+}
+
+impl DopPcmFormat {
+    fn aplay_format(self) -> &'static str {
+        match self {
+            Self::S32Le => "S32_LE",
+            Self::S24Le => "S24_LE",
+            Self::S24_3Le => "S24_3LE",
+        }
+    }
+
+    fn push_dop_sample(self, lo: u8, hi: u8, marker: u8, out: &mut Vec<u8>) {
+        match self {
+            Self::S24_3Le => out.extend_from_slice(&[lo, hi, marker]),
+            Self::S24Le | Self::S32Le => {
+                out.extend_from_slice(&[lo, hi, marker, 0x00]);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct DsdSourceInfo {
+    channels: usize,
+    dsd_rate_hz: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DsdPlaybackPlan {
+    device: String,
+    transport: DsdTransport,
+    channels: usize,
+    sample_rate: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+struct AlsaStreamCapabilities {
+    formats: Vec<String>,
+    rates: Vec<u32>,
+}
+
+impl AlsaStreamCapabilities {
+    fn supports(&self, format: &str, rate: u32) -> bool {
+        self.formats.iter().any(|value| value == format)
+            && self.rates.iter().any(|value| *value == rate)
+    }
+
+    fn summary(&self) -> String {
+        let formats = if self.formats.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.formats.join(", ")
+        };
+        let rates = if self.rates.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.rates
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        format!("formats=[{formats}] rates=[{rates}]")
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TrackResolver {
     db_path: PathBuf,
+    allow_absolute_paths: bool,
 }
 
 #[derive(Debug, Clone)]
 struct OutputController {
     inner: Arc<Mutex<OutputState>>,
-    device: Arc<String>,
+    configured_device: Option<Arc<String>>,
+    alsa_cards_path: Arc<PathBuf>,
+    dsd_policy: DsdOutputPolicy,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct UsbAudioOutputDevice {
+    card_index: usize,
+    card_id: String,
+    name: String,
+    alsa_device: String,
 }
 
 #[derive(Debug, Default)]
@@ -257,7 +431,18 @@ impl PlaybackOperationError {
 
 impl TrackResolver {
     fn new(db_path: PathBuf) -> Self {
-        Self { db_path }
+        Self::new_with_absolute_path_playback(db_path, absolute_path_playback_enabled())
+    }
+
+    fn new_with_absolute_path_playback(db_path: PathBuf, allow_absolute_paths: bool) -> Self {
+        Self {
+            db_path,
+            allow_absolute_paths,
+        }
+    }
+
+    fn allows_absolute_paths(&self) -> bool {
+        self.allow_absolute_paths
     }
 
     fn resolve(&self, track_id: &str) -> Result<ResolvedTrack, PlaybackOperationError> {
@@ -283,6 +468,7 @@ impl TrackResolver {
                     COALESCE(NULLIF(t.title, ''), t.filename),
                     t.duration_ms,
                     COALESCE(LOWER(t.format), ''),
+                    COALESCE(v.is_available, 1),
                     v.mount_path
                 FROM tracks t
                 JOIN volumes v ON v.volume_uuid = t.volume_uuid
@@ -294,17 +480,21 @@ impl TrackResolver {
                     let duration_ms = row
                         .get::<_, Option<i64>>(4)?
                         .and_then(|value| u64::try_from(value).ok());
-                    let mount_path: String = row.get(6)?;
+                    let is_available = row.get::<_, i64>(6)? != 0;
+                    let mount_path: String = row.get(7)?;
                     let relative_path: String = row.get(2)?;
-                    Ok(ResolvedTrack {
-                        track_uid: row.get(0)?,
-                        volume_uuid: row.get(1)?,
-                        relative_path: relative_path.clone(),
-                        title: row.get::<_, Option<String>>(3)?,
-                        duration_ms,
-                        format: row.get(5)?,
-                        absolute_path: PathBuf::from(mount_path).join(&relative_path),
-                    })
+                    Ok((
+                        ResolvedTrack {
+                            track_uid: row.get(0)?,
+                            volume_uuid: row.get(1)?,
+                            relative_path: relative_path.clone(),
+                            title: row.get::<_, Option<String>>(3)?,
+                            duration_ms,
+                            format: row.get(5)?,
+                            absolute_path: PathBuf::from(mount_path).join(&relative_path),
+                        },
+                        is_available,
+                    ))
                 },
             )
             .optional()
@@ -316,13 +506,22 @@ impl TrackResolver {
                 )
             })?;
 
-        row.ok_or_else(|| {
+        let (track, is_available) = row.ok_or_else(|| {
             PlaybackOperationError::content(
                 "track_not_found",
                 format!("track is not present in library.db: {track_id}"),
                 true,
             )
-        })
+        })?;
+        if !is_available {
+            return Err(PlaybackOperationError::content(
+                "track_volume_unavailable",
+                format!("track volume is offline: {}", track.volume_uuid),
+                false,
+            ));
+        }
+
+        Ok(track)
     }
 
     fn resolve_path_track(
@@ -330,7 +529,17 @@ impl TrackResolver {
         track_id: &str,
     ) -> Result<Option<ResolvedTrack>, PlaybackOperationError> {
         let candidate = Path::new(track_id);
-        if !candidate.is_absolute() || !candidate.exists() {
+        if !candidate.is_absolute() {
+            return Ok(None);
+        }
+        if !self.allow_absolute_paths {
+            return Err(PlaybackOperationError::content(
+                "absolute_path_playback_disabled",
+                "absolute path playback is disabled; use a library track uid",
+                false,
+            ));
+        }
+        if !candidate.exists() {
             return Ok(None);
         }
 
@@ -352,16 +561,39 @@ impl TrackResolver {
     }
 }
 
+fn absolute_path_playback_enabled() -> bool {
+    match std::env::var(ALLOW_ABSOLUTE_PATHS_ENV) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 impl OutputController {
-    fn new(device: String) -> Self {
+    fn new(
+        configured_device: Option<String>,
+        alsa_cards_path: PathBuf,
+        dsd_policy: DsdOutputPolicy,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(OutputState::default())),
-            device: Arc::new(device),
+            configured_device: configured_device.map(Arc::new),
+            alsa_cards_path: Arc::new(alsa_cards_path),
+            dsd_policy,
         }
     }
 
-    fn device_label(&self) -> &str {
-        self.device.as_str()
+    fn device_label(&self) -> String {
+        match self.configured_device.as_deref() {
+            Some(device) => format!("configured {device}"),
+            None => format!("auto USB DAC via {}", self.alsa_cards_path.display()),
+        }
+    }
+
+    fn dsd_policy_label(&self) -> &'static str {
+        self.dsd_policy.as_str()
     }
 
     fn start(
@@ -387,7 +619,8 @@ impl OutputController {
         let (generation, stale_pid) = self.begin_generation();
         self.stop_pid_and_wait(stale_pid);
 
-        let child = self.spawn_output_child(&track)?;
+        let output_device = self.resolve_output_device()?;
+        let child = self.spawn_output_child(&track, output_device.as_str())?;
 
         let pid = child.id();
         {
@@ -509,18 +742,43 @@ impl OutputController {
         let _ = wait_for_process_exit(pid, Duration::from_millis(400));
     }
 
-    fn spawn_output_child(&self, track: &ResolvedTrack) -> Result<Child, PlaybackOperationError> {
-        if resolved_format(track) == "wav" {
-            return self.spawn_aplay_file(track);
+    fn resolve_output_device(&self) -> Result<String, PlaybackOperationError> {
+        if let Some(device) = self.configured_device.as_deref() {
+            return Ok(device.to_string());
         }
 
-        self.spawn_decoded_aplay(track)
+        let selected = resolve_auto_usb_audio_output(&self.alsa_cards_path)?;
+        println!(
+            "playbackd selected USB audio output: {} ({})",
+            selected.name, selected.alsa_device
+        );
+        Ok(selected.alsa_device)
     }
 
-    fn spawn_aplay_file(&self, track: &ResolvedTrack) -> Result<Child, PlaybackOperationError> {
+    fn spawn_output_child(
+        &self,
+        track: &ResolvedTrack,
+        device: &str,
+    ) -> Result<Child, PlaybackOperationError> {
+        if is_dsd_format(track) {
+            return self.spawn_dsd_aplay(track, device);
+        }
+
+        if resolved_format(track) == "wav" {
+            return self.spawn_aplay_file(track, device);
+        }
+
+        self.spawn_decoded_aplay(track, device)
+    }
+
+    fn spawn_aplay_file(
+        &self,
+        track: &ResolvedTrack,
+        device: &str,
+    ) -> Result<Child, PlaybackOperationError> {
         Command::new("aplay")
             .arg("-D")
-            .arg(self.device.as_str())
+            .arg(device)
             .arg(&track.absolute_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -531,17 +789,77 @@ impl OutputController {
                     format!(
                         "spawn aplay for {} on {}: {err}",
                         track.absolute_path.display(),
-                        self.device.as_str()
+                        device
                     ),
                 )
             })
     }
 
-    fn spawn_decoded_aplay(&self, track: &ResolvedTrack) -> Result<Child, PlaybackOperationError> {
+    fn spawn_dsd_aplay(
+        &self,
+        track: &ResolvedTrack,
+        device: &str,
+    ) -> Result<Child, PlaybackOperationError> {
+        let plan = select_dsd_playback_plan(track, device, self.dsd_policy)?;
+        let mut child = Command::new("aplay")
+            .arg("-D")
+            .arg(plan.device.as_str())
+            .arg("-t")
+            .arg("raw")
+            .arg("-f")
+            .arg(plan.aplay_format())
+            .arg("-c")
+            .arg(plan.channels.to_string())
+            .arg("-r")
+            .arg(plan.sample_rate.to_string())
+            .arg("--disable-resample")
+            .arg("--disable-channels")
+            .arg("--disable-format")
+            .arg("--disable-softvol")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| {
+                PlaybackOperationError::output(
+                    "alsa_open_failed",
+                    format!(
+                        "spawn DSD aplay for {} on {} ({}): {err}",
+                        track.absolute_path.display(),
+                        plan.device,
+                        plan.aplay_format()
+                    ),
+                )
+            })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            PlaybackOperationError::output(
+                "alsa_pipe_unavailable",
+                format!("dsd aplay stdin is unavailable for {}", track.track_uid),
+            )
+        })?;
+
+        let path = track.absolute_path.clone();
+        let track_id = track.track_uid.clone();
+        let transport = plan.transport;
+        thread::spawn(move || {
+            if let Err(err) = stream_dsd_audio(path, stdin, transport) {
+                eprintln!("playbackd dsd stream error for {track_id}: {err}");
+            }
+        });
+
+        Ok(child)
+    }
+
+    fn spawn_decoded_aplay(
+        &self,
+        track: &ResolvedTrack,
+        device: &str,
+    ) -> Result<Child, PlaybackOperationError> {
         let pcm = inspect_decoded_pcm(track)?;
         let mut child = Command::new("aplay")
             .arg("-D")
-            .arg(self.device.as_str())
+            .arg(device)
             .arg("-t")
             .arg("raw")
             .arg("-f")
@@ -560,7 +878,7 @@ impl OutputController {
                     format!(
                         "spawn decoded aplay for {} on {}: {err}",
                         track.absolute_path.display(),
-                        self.device.as_str()
+                        device
                     ),
                 )
             })?;
@@ -708,6 +1026,12 @@ impl RuntimeState {
                 persist_queue: false,
                 persist_history: false,
             },
+            PlaybackCommand::HistorySnapshot => CommandOutcome {
+                response_line: format_history_snapshot_line(&self.history_snapshot_view()),
+                events: Vec::new(),
+                persist_queue: false,
+                persist_history: false,
+            },
             PlaybackCommand::Play(track_id) => {
                 if self.playback_state == PlaybackState::Paused
                     && self.current_track.as_deref() == Some(track_id.as_str())
@@ -740,6 +1064,7 @@ impl RuntimeState {
                     persist_history: true,
                 }
             }
+            PlaybackCommand::QueuePlay(track_ids) => self.queue_play(track_ids),
             PlaybackCommand::QueueAppend(track_id) => {
                 self.queue_append(track_id.clone());
                 CommandOutcome {
@@ -770,7 +1095,7 @@ impl RuntimeState {
             PlaybackCommand::QueueClear => self.queue_clear(),
             PlaybackCommand::QueueReplace(track_ids) => self.queue_replace(track_ids),
             PlaybackCommand::PlayHistory(track_id) => {
-                self.enqueue_and_activate(track_id.clone(), "play_history");
+                self.play_history_now(track_id.clone());
                 self.record_current_track_history();
                 CommandOutcome {
                     response_line: format_ack_line(
@@ -836,6 +1161,44 @@ impl RuntimeState {
         }
     }
 
+    fn play_history_now(&mut self, track_id: String) {
+        self.replace_current_queue_track(track_id.clone());
+        self.playback_state = PlaybackState::QuietActive;
+        self.current_track = self.resolved_current_track();
+        self.last_command = Some(format!("play_history:{track_id}"));
+    }
+
+    fn replace_current_queue_track(&mut self, track_id: String) {
+        let target_order_index = self
+            .snapshot
+            .current_order_index
+            .filter(|index| *index < self.snapshot.play_order.len())
+            .unwrap_or(0);
+
+        if self.snapshot.play_order.is_empty() {
+            let queue_entry_id = self.push_track_entry(track_id);
+            self.snapshot.play_order.push(queue_entry_id);
+            self.snapshot.current_order_index = Some(0);
+            return;
+        }
+
+        self.snapshot.current_order_index = Some(target_order_index);
+
+        let queue_entry_id = self.snapshot.play_order[target_order_index].clone();
+        let entry = self
+            .snapshot
+            .tracks
+            .iter_mut()
+            .find(|entry| entry.queue_entry_id == queue_entry_id)
+            .expect("play_order must reference an existing queue entry");
+
+        entry.track_uid = track_id.clone();
+        entry.volume_uuid = "manual".to_string();
+        entry.relative_path = track_id.clone();
+        entry.title = Some(track_id);
+        entry.duration_ms = None;
+    }
+
     fn enqueue_and_activate(&mut self, track_id: String, action: &str) {
         let queue_entry_id = self.push_track_entry(track_id.clone());
         self.snapshot.play_order.push(queue_entry_id);
@@ -853,6 +1216,50 @@ impl RuntimeState {
         self.snapshot.play_order.push(queue_entry_id);
         self.ensure_selected_track_for_non_empty_queue();
         self.last_command = Some(format!("queue_append:{track_id}"));
+    }
+
+    fn queue_play(&mut self, track_ids: Vec<String>) -> CommandOutcome {
+        if track_ids.is_empty() {
+            return CommandOutcome {
+                response_line: format_error_line("empty_queue", "no_track_ids"),
+                events: Vec::new(),
+                persist_queue: false,
+                persist_history: false,
+            };
+        }
+
+        self.snapshot = QueueSnapshot {
+            order_mode: OrderMode::Sequential,
+            repeat_mode: RepeatMode::Off,
+            current_order_index: None,
+            play_order: Vec::new(),
+            tracks: Vec::new(),
+        };
+        self.next_queue_entry_id = 1;
+
+        for track_id in &track_ids {
+            let queue_entry_id = self.push_track_entry(track_id.clone());
+            self.snapshot.play_order.push(queue_entry_id);
+        }
+
+        self.snapshot.current_order_index = Some(0);
+        let track_id = track_ids[0].clone();
+        self.playback_state = PlaybackState::QuietActive;
+        self.current_track = self.resolved_current_track();
+        self.last_command = Some(format!("queue_play:{track_id}"));
+        self.record_current_track_history();
+
+        CommandOutcome {
+            response_line: format_ack_line("queue_play", self.playback_state, Some(&track_id)),
+            events: vec![
+                PlaybackEvent::PlayRequestAccepted {
+                    track_id: track_id.clone(),
+                },
+                PlaybackEvent::PlaybackStarted { track_id },
+            ],
+            persist_queue: true,
+            persist_history: true,
+        }
     }
 
     fn queue_insert_next(&mut self, track_id: String) {
@@ -1136,6 +1543,24 @@ impl RuntimeState {
         }
     }
 
+    fn history_snapshot_view(&self) -> HistorySnapshotView {
+        let entries = self
+            .history_log
+            .entries
+            .iter()
+            .map(|entry| HistorySnapshotEntryView {
+                played_at: entry.played_at,
+                track_uid: entry.track_uid.clone(),
+                volume_uuid: entry.volume_uuid.clone(),
+                relative_path: entry.relative_path.clone(),
+                title: entry.title.clone(),
+                duration_ms: entry.duration_ms,
+            })
+            .collect();
+
+        HistorySnapshotView { entries }
+    }
+
     fn resolved_current_track(&self) -> Option<String> {
         resolve_track_uid(&self.snapshot, self.snapshot.current_order_index)
     }
@@ -1185,6 +1610,58 @@ impl RuntimeState {
         if let Some(entry) = self.current_history_entry() {
             self.history_log.push_recent(entry, HISTORY_LIMIT);
         }
+    }
+
+    fn sync_recent_history_entry_from_track(&mut self, track: &ResolvedTrack) -> bool {
+        let Some(entry) = self.history_log.entries.first_mut() else {
+            return false;
+        };
+        if entry.track_uid != track.track_uid {
+            return false;
+        }
+
+        let mut changed = false;
+        if entry.volume_uuid != track.volume_uuid {
+            entry.volume_uuid = track.volume_uuid.clone();
+            changed = true;
+        }
+        if entry.relative_path != track.relative_path {
+            entry.relative_path = track.relative_path.clone();
+            changed = true;
+        }
+        if entry.title != track.title {
+            entry.title = track.title.clone();
+            changed = true;
+        }
+        if entry.duration_ms != track.duration_ms {
+            entry.duration_ms = track.duration_ms;
+            changed = true;
+        }
+
+        changed
+    }
+
+    fn rollback_recent_history_for_track(&mut self, track_id: &str) -> bool {
+        let Some(first_entry) = self.history_log.entries.first() else {
+            return false;
+        };
+        if first_entry.track_uid != track_id {
+            return false;
+        }
+
+        let Some(current_entry) = self.current_history_entry() else {
+            return false;
+        };
+        if first_entry.volume_uuid != current_entry.volume_uuid
+            || first_entry.relative_path != current_entry.relative_path
+            || first_entry.title != current_entry.title
+            || first_entry.duration_ms != current_entry.duration_ms
+        {
+            return false;
+        }
+
+        self.history_log.entries.remove(0);
+        true
     }
 
     fn current_history_entry(&self) -> Option<HistoryEntry> {
@@ -1240,10 +1717,11 @@ impl RuntimeState {
             changed = true;
         }
 
+        let _ = self.sync_recent_history_entry_from_track(track);
         changed
     }
 
-    fn mark_output_failure(&mut self, track_id: &str, reason: &str) -> bool {
+    fn apply_failure_state(&mut self, track_id: &str, err: &PlaybackOperationError) -> bool {
         if self.current_track.as_deref() != Some(track_id) {
             return false;
         }
@@ -1254,8 +1732,12 @@ impl RuntimeState {
             return false;
         }
 
-        self.playback_state = PlaybackState::QuietErrorHold;
-        self.last_command = Some(format!("playback_failed:{track_id}:{reason}"));
+        self.playback_state = match err.class {
+            PlaybackFailureClass::Output => PlaybackState::Stopped,
+            PlaybackFailureClass::Content if err.keep_quiet => PlaybackState::QuietErrorHold,
+            PlaybackFailureClass::Content => PlaybackState::Stopped,
+        };
+        self.last_command = Some(format!("playback_failed:{track_id}:{}", err.reason));
         true
     }
 
@@ -1396,15 +1878,31 @@ fn handle_client(
         }
     };
 
-    let (mut outcome, mut snapshot_to_persist, history_to_persist, output_action) = {
+    let preflight_track_id = {
+        let state = state
+            .lock()
+            .map_err(|_| "playback state lock poisoned".to_string())?;
+        playback_track_id_for_preflight(&state, &command)
+    };
+    if let Some(track_id) = preflight_track_id {
+        if let Err(err) = preflight_track_request(&track_resolver, &track_id) {
+            let response = format_error_line(err.code, &err.reason);
+            let mut stream = stream;
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .map_err(|write_err| format!("write preflight failure: {write_err}"))?;
+            return Ok(());
+        }
+    }
+
+    let (mut outcome, mut snapshot_to_persist, output_action) = {
         let mut state = state
             .lock()
             .map_err(|_| "playback state lock poisoned".to_string())?;
         let outcome = state.apply_command(command);
         let output_action = derive_output_action(&state, &outcome);
         let snapshot = outcome.persist_queue.then(|| state.snapshot.clone());
-        let history = outcome.persist_history.then(|| state.history_log.clone());
-        (outcome, snapshot, history, output_action)
+        (outcome, snapshot, output_action)
     };
 
     apply_output_action(
@@ -1418,6 +1916,12 @@ fn handle_client(
         &mut outcome,
         &mut snapshot_to_persist,
     );
+
+    let history_to_persist = if outcome.persist_history {
+        state.lock().ok().map(|runtime| runtime.history_log.clone())
+    } else {
+        None
+    };
 
     if let Some(snapshot) = snapshot_to_persist {
         persist_queue_snapshot(queue_path.as_ref(), &snapshot)?;
@@ -1516,6 +2020,44 @@ fn apply_output_action(
     }
 }
 
+fn playback_track_id_for_preflight(
+    state: &RuntimeState,
+    command: &PlaybackCommand,
+) -> Option<String> {
+    match command {
+        PlaybackCommand::Play(track_id)
+            if state.playback_state == PlaybackState::Paused
+                && state.current_track.as_deref() == Some(track_id.as_str()) =>
+        {
+            None
+        }
+        PlaybackCommand::Play(track_id) | PlaybackCommand::PlayHistory(track_id) => {
+            Some(track_id.clone())
+        }
+        PlaybackCommand::QueuePlay(track_ids) => track_ids.first().cloned(),
+        _ => None,
+    }
+}
+
+fn preflight_track_request(
+    track_resolver: &TrackResolver,
+    track_id: &str,
+) -> Result<(), PlaybackOperationError> {
+    let track = track_resolver.resolve(track_id)?;
+    if !track.absolute_path.exists() {
+        return Err(PlaybackOperationError::content(
+            "track_file_missing",
+            format!(
+                "resolved media path is missing: {}",
+                track.absolute_path.display()
+            ),
+            false,
+        ));
+    }
+
+    Ok(())
+}
+
 fn apply_operation_failure(
     state: Arc<Mutex<RuntimeState>>,
     outcome: &mut CommandOutcome,
@@ -1524,7 +2066,10 @@ fn apply_operation_failure(
 ) {
     if let Some(track_id) = track_id.as_deref() {
         if let Ok(mut runtime) = state.lock() {
-            let _ = runtime.mark_output_failure(track_id, &err.reason);
+            let _ = runtime.apply_failure_state(track_id, &err);
+            if outcome.persist_history {
+                let _ = runtime.rollback_recent_history_for_track(track_id);
+            }
         }
     }
 
@@ -1535,6 +2080,7 @@ fn apply_operation_failure(
         recoverable: err.recoverable,
         keep_quiet: err.keep_quiet,
     }];
+    outcome.persist_history = false;
 }
 
 fn apply_async_operation_failure(
@@ -1545,7 +2091,8 @@ fn apply_async_operation_failure(
 ) {
     if let Some(track_id) = track_id {
         if let Ok(mut runtime) = state.lock() {
-            let _ = runtime.mark_output_failure(track_id, &err.reason);
+            let _ = runtime.apply_failure_state(track_id, &err);
+            let _ = runtime.rollback_recent_history_for_track(track_id);
         }
     }
 
@@ -1816,6 +2363,171 @@ fn process_exists(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+fn configured_audio_device_from_env() -> Option<String> {
+    std::env::var(AUDIO_DEVICE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn alsa_cards_path_from_env() -> PathBuf {
+    std::env::var(ALSA_CARDS_PATH_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ALSA_CARDS_PATH))
+}
+
+fn resolve_auto_usb_audio_output(
+    cards_path: &Path,
+) -> Result<UsbAudioOutputDevice, PlaybackOperationError> {
+    let contents = fs::read_to_string(cards_path).map_err(|err| {
+        PlaybackOperationError::output(
+            "audio_output_unavailable",
+            format!("read {}: {err}", cards_path.display()),
+        )
+    })?;
+    select_unique_usb_audio_output(&contents)
+}
+
+fn select_unique_usb_audio_output(
+    cards: &str,
+) -> Result<UsbAudioOutputDevice, PlaybackOperationError> {
+    let devices = usb_audio_output_devices_from_cards(cards);
+    match devices.as_slice() {
+        [] => Err(PlaybackOperationError::output(
+            "audio_output_unavailable",
+            "no USB Audio DAC found in /proc/asound/cards",
+        )),
+        [device] => Ok(device.clone()),
+        _ => Err(PlaybackOperationError::output(
+            "audio_output_ambiguous",
+            format!(
+                "multiple USB Audio DACs connected: {}",
+                devices
+                    .iter()
+                    .map(|device| format!("{} ({})", device.name, device.alsa_device))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+    }
+}
+
+fn usb_audio_output_devices_from_cards(cards: &str) -> Vec<UsbAudioOutputDevice> {
+    let lines = cards.lines().collect::<Vec<_>>();
+    let mut devices = Vec::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some((card_index, card_id, driver, name)) = parse_alsa_card_line(line) else {
+            continue;
+        };
+        let detail = lines
+            .get(index + 1)
+            .filter(|next| parse_alsa_card_line(next).is_none())
+            .map(|next| next.trim())
+            .unwrap_or("");
+
+        if !is_usb_audio_card(&driver, detail) {
+            continue;
+        }
+
+        devices.push(UsbAudioOutputDevice {
+            card_index,
+            card_id: card_id.clone(),
+            name: decoder_display_name(&name, detail),
+            alsa_device: format!("plughw:CARD={card_id},DEV=0"),
+        });
+    }
+
+    devices
+}
+
+fn parse_alsa_card_line(line: &str) -> Option<(usize, String, String, String)> {
+    let trimmed = line.trim_start();
+    let (index_text, after_index) = trimmed.split_once('[')?;
+    let card_index = index_text.trim().parse::<usize>().ok()?;
+    let (card_id, after_card) = after_index.split_once(']')?;
+    let after_card = after_card.trim_start();
+    let after_card = after_card.strip_prefix(':')?.trim_start();
+    let (driver, name) = after_card.split_once(" - ")?;
+
+    Some((
+        card_index,
+        card_id.trim().to_string(),
+        driver.trim().to_string(),
+        name.trim().to_string(),
+    ))
+}
+
+fn is_usb_audio_card(driver: &str, detail: &str) -> bool {
+    let driver = driver.trim().to_ascii_lowercase();
+    let detail = detail.trim().to_ascii_lowercase();
+    driver == "usb-audio" || detail.contains(" at usb-")
+}
+
+fn decoder_display_name(name: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    if !detail.is_empty() {
+        let mut display = detail;
+        for marker in [" at usb-", " at "] {
+            if let Some(index) = display.find(marker) {
+                display = display[..index].trim();
+                break;
+            }
+        }
+        if !display.is_empty() {
+            return display.to_string();
+        }
+    }
+
+    name.trim().to_string()
+}
+
+fn load_dsd_output_policy() -> DsdOutputPolicy {
+    if let Ok(value) = std::env::var("LUMELO_DSD_OUTPUT_POLICY") {
+        if let Some(policy) = DsdOutputPolicy::parse(&value) {
+            return policy;
+        }
+    }
+
+    if let Ok(config_path) = std::env::var("LUMELO_CONFIG_PATH") {
+        if let Ok(contents) = fs::read_to_string(config_path) {
+            if let Some(policy) = parse_dsd_output_policy_from_config(&contents) {
+                return policy;
+            }
+        }
+    }
+
+    if let Ok(contents) = fs::read_to_string(DEFAULT_CONFIG_PATH) {
+        if let Some(policy) = parse_dsd_output_policy_from_config(&contents) {
+            return policy;
+        }
+    }
+
+    DEFAULT_DSD_POLICY
+}
+
+fn parse_dsd_output_policy_from_config(contents: &str) -> Option<DsdOutputPolicy> {
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "dsd_output_policy" {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        return DsdOutputPolicy::parse(value);
+    }
+
+    None
+}
+
 fn resolved_format(track: &ResolvedTrack) -> String {
     if !track.format.is_empty() {
         return track.format.clone();
@@ -1824,18 +2536,276 @@ fn resolved_format(track: &ResolvedTrack) -> String {
     detect_format(&track.absolute_path)
 }
 
-fn inspect_decoded_pcm(track: &ResolvedTrack) -> Result<DecodedPCMConfig, PlaybackOperationError> {
-    let (mut format, track_id, mut decoder) = open_decoder(&track.absolute_path).map_err(|err| {
+fn is_dsd_format(track: &ResolvedTrack) -> bool {
+    matches!(resolved_format(track).as_str(), "dff" | "dsf" | "dsd")
+}
+
+impl DsdPlaybackPlan {
+    fn aplay_format(&self) -> &'static str {
+        match self.transport {
+            DsdTransport::Native(format) => format.aplay_format(),
+            DsdTransport::Dop(format) => format.aplay_format(),
+            DsdTransport::Pcm => "S16_LE",
+        }
+    }
+}
+
+fn select_dsd_playback_plan(
+    track: &ResolvedTrack,
+    device: &str,
+    policy: DsdOutputPolicy,
+) -> Result<DsdPlaybackPlan, PlaybackOperationError> {
+    let source = inspect_dsd_source_info(&track.absolute_path).map_err(|err| {
         PlaybackOperationError::content(
             "unsupported_format",
             format!(
-                "prepare decoder for {} ({}): {err}",
+                "prepare DSD transport for {} ({}): {err}",
                 track.track_uid,
                 empty_label(&resolved_format(track))
             ),
             true,
         )
     })?;
+    let capabilities = load_alsa_stream_capabilities(device).map_err(|err| {
+        PlaybackOperationError::output(
+            "dsd_capability_probe_failed",
+            format!("probe DSD capability on {}: {err}", raw_dsd_device(device)),
+        )
+    })?;
+
+    let selected = match policy {
+        DsdOutputPolicy::NativeDsd => select_native_dsd_plan(source, device, &capabilities),
+        DsdOutputPolicy::Dop => select_dop_plan(source, device, &capabilities),
+    };
+    if let Some(plan) = selected {
+        return Ok(plan);
+    }
+
+    if let Some(plan) = select_pcm_fallback_plan(source, device, &capabilities) {
+        return Ok(plan);
+    }
+
+    let device_label = raw_dsd_device(device);
+    let capability_summary = capabilities.summary();
+    let policy_label = policy.as_str();
+    Err(PlaybackOperationError::output(
+        "dsd_pcm_fallback_unavailable",
+        format!(
+            "selected DSD policy {policy_label} and PCM fallback are unavailable on {device_label}, {capability_summary}"
+        ),
+    ))
+}
+
+fn inspect_dsd_source_info(path: &Path) -> Result<DsdSourceInfo, String> {
+    let reader = DsdReader::from_container(path.to_path_buf())
+        .map_err(|err| format!("open {}: {err}", path.display()))?;
+    let dsd_multiplier = u32::try_from(reader.dsd_rate())
+        .map_err(|_| format!("invalid DSD rate for {}", path.display()))?;
+
+    Ok(DsdSourceInfo {
+        channels: reader.channels_num(),
+        dsd_rate_hz: DSD64_RATE_HZ
+            .checked_mul(dsd_multiplier)
+            .ok_or_else(|| format!("DSD rate overflow for {}", path.display()))?,
+    })
+}
+
+fn select_native_dsd_plan(
+    source: DsdSourceInfo,
+    device: &str,
+    capabilities: &AlsaStreamCapabilities,
+) -> Option<DsdPlaybackPlan> {
+    let device = raw_dsd_device(device);
+    for format in [
+        AlsaDsdFormat::U32Le,
+        AlsaDsdFormat::U32Be,
+        AlsaDsdFormat::U16Le,
+        AlsaDsdFormat::U16Be,
+        AlsaDsdFormat::U8,
+    ] {
+        let sample_rate = source.dsd_rate_hz / format.sample_rate_divisor();
+        if capabilities.supports(format.aplay_format(), sample_rate) {
+            return Some(DsdPlaybackPlan {
+                device: device.clone(),
+                transport: DsdTransport::Native(format),
+                channels: source.channels,
+                sample_rate,
+            });
+        }
+    }
+
+    None
+}
+
+fn select_dop_plan(
+    source: DsdSourceInfo,
+    device: &str,
+    capabilities: &AlsaStreamCapabilities,
+) -> Option<DsdPlaybackPlan> {
+    let device = raw_dsd_device(device);
+    let sample_rate = source.dsd_rate_hz / 16;
+    for format in [
+        DopPcmFormat::S32Le,
+        DopPcmFormat::S24_3Le,
+        DopPcmFormat::S24Le,
+    ] {
+        if capabilities.supports(format.aplay_format(), sample_rate) {
+            return Some(DsdPlaybackPlan {
+                device: device.clone(),
+                transport: DsdTransport::Dop(format),
+                channels: source.channels,
+                sample_rate,
+            });
+        }
+    }
+
+    None
+}
+
+fn select_pcm_fallback_plan(
+    source: DsdSourceInfo,
+    device: &str,
+    capabilities: &AlsaStreamCapabilities,
+) -> Option<DsdPlaybackPlan> {
+    if !capabilities.supports("S16_LE", DSD_PCM_FALLBACK_RATE_HZ) {
+        return None;
+    }
+
+    Some(DsdPlaybackPlan {
+        device: raw_dsd_device(device),
+        transport: DsdTransport::Pcm,
+        channels: source.channels,
+        sample_rate: DSD_PCM_FALLBACK_RATE_HZ,
+    })
+}
+
+fn raw_dsd_device(device: &str) -> String {
+    device
+        .strip_prefix("plughw:")
+        .map(|value| format!("hw:{value}"))
+        .unwrap_or_else(|| device.to_string())
+}
+
+fn load_alsa_stream_capabilities(device: &str) -> Result<AlsaStreamCapabilities, String> {
+    let raw_device = raw_dsd_device(device);
+    let card_token = parse_card_token(&raw_device)
+        .ok_or_else(|| format!("unsupported device label: {raw_device}"))?;
+    let device_index = parse_device_index(&raw_device).unwrap_or(0);
+    let card_dir = resolve_proc_card_dir(&card_token)?;
+    let stream_path = card_dir.join(format!("stream{device_index}"));
+    let stream = fs::read_to_string(&stream_path)
+        .map_err(|err| format!("read {}: {err}", stream_path.display()))?;
+
+    Ok(parse_alsa_stream_capabilities(&stream))
+}
+
+fn parse_card_token(device: &str) -> Option<String> {
+    if let Some(card) = device
+        .split("CARD=")
+        .nth(1)
+        .and_then(|value| value.split(',').next())
+    {
+        return Some(card.to_string());
+    }
+
+    device
+        .split(':')
+        .nth(1)
+        .and_then(|value| value.split(',').next())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn parse_device_index(device: &str) -> Option<usize> {
+    if let Some(index) = device
+        .split("DEV=")
+        .nth(1)
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return Some(index);
+    }
+
+    device
+        .split(':')
+        .nth(1)
+        .and_then(|value| value.split(',').nth(1))
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn resolve_proc_card_dir(card_token: &str) -> Result<PathBuf, String> {
+    if card_token.chars().all(|value| value.is_ascii_digit()) {
+        return Ok(PathBuf::from(format!("/proc/asound/card{card_token}")));
+    }
+
+    let proc_root = Path::new("/proc/asound");
+    for entry in
+        fs::read_dir(proc_root).map_err(|err| format!("read {}: {err}", proc_root.display()))?
+    {
+        let entry = entry.map_err(|err| format!("read proc asound entry: {err}"))?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("card") {
+            continue;
+        }
+        let id_path = entry.path().join("id");
+        let Ok(id) = fs::read_to_string(&id_path) else {
+            continue;
+        };
+        if id.trim() == card_token {
+            return Ok(entry.path());
+        }
+    }
+
+    Err(format!(
+        "no /proc/asound/card*/id entry matches {card_token}"
+    ))
+}
+
+fn parse_alsa_stream_capabilities(stream: &str) -> AlsaStreamCapabilities {
+    let mut formats = Vec::new();
+    let mut rates = Vec::new();
+
+    for line in stream.lines() {
+        let trimmed = line.trim();
+        if let Some(format) = trimmed.strip_prefix("Format: ") {
+            let format = format.trim().to_string();
+            if !formats.iter().any(|value| value == &format) {
+                formats.push(format);
+            }
+            continue;
+        }
+
+        if let Some(list) = trimmed.strip_prefix("Rates: ") {
+            for part in list.split(',') {
+                let Ok(rate) = part.trim().parse::<u32>() else {
+                    continue;
+                };
+                if !rates.iter().any(|value| *value == rate) {
+                    rates.push(rate);
+                }
+            }
+        }
+    }
+
+    AlsaStreamCapabilities { formats, rates }
+}
+
+fn inspect_decoded_pcm(track: &ResolvedTrack) -> Result<DecodedPCMConfig, PlaybackOperationError> {
+    let (mut format, track_id, mut decoder) =
+        open_decoder(&track.absolute_path).map_err(|err| {
+            PlaybackOperationError::content(
+                "unsupported_format",
+                format!(
+                    "prepare decoder for {} ({}): {err}",
+                    track.track_uid,
+                    empty_label(&resolved_format(track))
+                ),
+                true,
+            )
+        })?;
 
     loop {
         let packet = match format.next_packet() {
@@ -1845,7 +2815,10 @@ fn inspect_decoded_pcm(track: &ResolvedTrack) -> Result<DecodedPCMConfig, Playba
             {
                 return Err(PlaybackOperationError::content(
                     "decode_probe_failed",
-                    format!("decoded stream ended before yielding audio: {}", track.track_uid),
+                    format!(
+                        "decoded stream ended before yielding audio: {}",
+                        track.track_uid
+                    ),
                     true,
                 ));
             }
@@ -1923,6 +2896,151 @@ fn stream_decoded_audio(path: PathBuf, mut stdin: ChildStdin) -> Result<(), Stri
         stdin
             .write_all(&pcm_bytes)
             .map_err(|err| format!("write pcm to aplay for {}: {err}", path.display()))?;
+    }
+
+    drop(stdin);
+    Ok(())
+}
+
+fn stream_dsd_audio(
+    path: PathBuf,
+    mut stdin: ChildStdin,
+    transport: DsdTransport,
+) -> Result<(), String> {
+    let reader = DsdReader::from_container(path.clone())
+        .map_err(|err| format!("open DSD container {}: {err}", path.display()))?;
+    let channels = reader.channels_num();
+    let mut iter = reader
+        .interl_iter(false, None)
+        .map_err(|err| format!("create DSD iterator for {}: {err}", path.display()))?;
+
+    match transport {
+        DsdTransport::Native(format) => {
+            let mut native_bytes = Vec::new();
+            for (read_size, buffers) in &mut iter {
+                let bytes = buffers
+                    .first()
+                    .ok_or_else(|| format!("empty DSD frame buffer for {}", path.display()))?;
+                native_bytes.clear();
+                native_bytes.reserve(read_size * format.sample_rate_divisor() as usize / 8);
+                for &byte in &bytes[..read_size] {
+                    format.push_dsd_byte(byte, &mut native_bytes);
+                }
+                stdin.write_all(&native_bytes).map_err(|err| {
+                    format!("write native DSD to aplay for {}: {err}", path.display())
+                })?;
+            }
+        }
+        DsdTransport::Dop(format) => {
+            let mut pending = Vec::new();
+            let mut dop_bytes = Vec::new();
+            let mut marker_index = 0usize;
+
+            for (read_size, buffers) in &mut iter {
+                let bytes = buffers
+                    .first()
+                    .ok_or_else(|| format!("empty DoP frame buffer for {}", path.display()))?;
+                pending.extend_from_slice(&bytes[..read_size]);
+
+                while pending.len() >= channels * 2 {
+                    let marker = if marker_index % 2 == 0 { 0x05 } else { 0xFA };
+                    marker_index += 1;
+                    dop_bytes.clear();
+                    for channel in 0..channels {
+                        let low = pending[channel];
+                        let high = pending[channels + channel];
+                        format.push_dop_sample(low, high, marker, &mut dop_bytes);
+                    }
+                    stdin.write_all(&dop_bytes).map_err(|err| {
+                        format!("write DoP frame to aplay for {}: {err}", path.display())
+                    })?;
+                    pending.drain(..channels * 2);
+                }
+            }
+
+            if !pending.is_empty() {
+                while pending.len() < channels * 2 {
+                    pending.push(DSD_SILENCE_BYTE);
+                }
+                let marker = if marker_index % 2 == 0 { 0x05 } else { 0xFA };
+                dop_bytes.clear();
+                for channel in 0..channels {
+                    let low = pending[channel];
+                    let high = pending[channels + channel];
+                    format.push_dop_sample(low, high, marker, &mut dop_bytes);
+                }
+                stdin.write_all(&dop_bytes).map_err(|err| {
+                    format!(
+                        "write final DoP frame to aplay for {}: {err}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        DsdTransport::Pcm => {
+            let decimation_bytes_per_channel = usize::try_from(reader.dsd_rate())
+                .unwrap_or(1)
+                .saturating_mul(8);
+            let mut pending = Vec::new();
+            let mut pcm_bytes = Vec::new();
+
+            for (read_size, buffers) in &mut iter {
+                let bytes = buffers.first().ok_or_else(|| {
+                    format!("empty PCM fallback frame buffer for {}", path.display())
+                })?;
+                pending.extend_from_slice(&bytes[..read_size]);
+
+                while pending.len() >= channels * decimation_bytes_per_channel {
+                    pcm_bytes.clear();
+                    for channel in 0..channels {
+                        let mut sum = 0i32;
+                        for byte_index in 0..decimation_bytes_per_channel {
+                            let byte = pending[channel + byte_index * channels];
+                            for bit_index in 0..8 {
+                                let bit = (byte >> (7 - bit_index)) & 1;
+                                sum += if bit == 0 { -1 } else { 1 };
+                            }
+                        }
+                        let normalized = sum as f32 / (decimation_bytes_per_channel as f32 * 8.0);
+                        let sample = (normalized * i16::MAX as f32) as i16;
+                        pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                    }
+                    stdin.write_all(&pcm_bytes).map_err(|err| {
+                        format!(
+                            "write PCM fallback frame to aplay for {}: {err}",
+                            path.display()
+                        )
+                    })?;
+                    pending.drain(..channels * decimation_bytes_per_channel);
+                }
+            }
+
+            if !pending.is_empty() {
+                while pending.len() < channels * decimation_bytes_per_channel {
+                    pending.push(DSD_SILENCE_BYTE);
+                }
+                pcm_bytes.clear();
+                for channel in 0..channels {
+                    let mut sum = 0i32;
+                    for byte_index in 0..decimation_bytes_per_channel {
+                        let byte = pending[channel + byte_index * channels];
+                        for bit_index in 0..8 {
+                            let bit = (byte >> (7 - bit_index)) & 1;
+                            sum += if bit == 0 { -1 } else { 1 };
+                        }
+                    }
+                    let normalized = sum as f32 / (decimation_bytes_per_channel as f32 * 8.0);
+                    let sample = (normalized * i16::MAX as f32) as i16;
+                    pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                }
+                stdin.write_all(&pcm_bytes).map_err(|err| {
+                    format!(
+                        "write final PCM fallback frame to aplay for {}: {err}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
     }
 
     drop(stdin);
@@ -2082,13 +3200,20 @@ fn repeat_mode_label(mode: RepeatMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_history_log, load_runtime_state, normalize_snapshot, persist_history_log,
-        persist_queue_snapshot, resolve_track_uid, RuntimeState, HISTORY_LIMIT,
+        apply_operation_failure, load_history_log, load_runtime_state, normalize_snapshot,
+        parse_alsa_stream_capabilities, parse_dsd_output_policy_from_config, persist_history_log,
+        persist_queue_snapshot, playback_track_id_for_preflight, preflight_track_request,
+        resolve_track_uid, select_dop_plan, select_native_dsd_plan, select_pcm_fallback_plan,
+        select_unique_usb_audio_output, usb_audio_output_devices_from_cards, AlsaDsdFormat,
+        AlsaStreamCapabilities, DopPcmFormat, DsdOutputPolicy, DsdSourceInfo,
+        PlaybackOperationError, ResolvedTrack, RuntimeState, TrackResolver, HISTORY_LIMIT,
     };
     use ipc_proto::parse_queue_snapshot_line;
     use media_model::{HistoryLog, OrderMode, QueueEntry, QueueSnapshot, RepeatMode};
+    use rusqlite::Connection;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2164,6 +3289,260 @@ mod tests {
         assert_eq!(state.history_log.entries.len(), 2);
         assert_eq!(state.history_log.entries[0].track_uid, "track-b");
         assert_eq!(state.history_log.entries[1].track_uid, "track-a");
+    }
+
+    #[test]
+    fn failed_play_rolls_back_recent_history_entry() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut outcome = {
+            let mut runtime = state.lock().unwrap();
+            runtime.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()))
+        };
+
+        {
+            let runtime = state.lock().unwrap();
+            assert_eq!(runtime.history_log.entries.len(), 1);
+            assert_eq!(runtime.history_log.entries[0].track_uid, "track-a");
+        }
+
+        apply_operation_failure(
+            Arc::clone(&state),
+            &mut outcome,
+            Some("track-a".to_string()),
+            PlaybackOperationError::content(
+                "missing_media",
+                "resolved media path is missing",
+                true,
+            ),
+        );
+
+        let runtime = state.lock().unwrap();
+        assert!(runtime.history_log.entries.is_empty());
+        assert_eq!(runtime.playback_state.as_str(), "quiet_error_hold");
+        assert!(!outcome.persist_history);
+        assert!(outcome.response_line.contains("ERR"));
+    }
+
+    #[test]
+    fn enrich_current_track_updates_recent_history_metadata() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+
+        let resolved = resolved_track(
+            "track-a",
+            "media-vol-1",
+            "albums/track-a.flac",
+            Some("Track A".to_string()),
+            Some(123_000),
+            "flac",
+        );
+
+        assert!(state.enrich_current_track(&resolved));
+        assert_eq!(state.history_log.entries.len(), 1);
+        assert_eq!(state.history_log.entries[0].track_uid, "track-a");
+        assert_eq!(state.history_log.entries[0].volume_uuid, "media-vol-1");
+        assert_eq!(
+            state.history_log.entries[0].relative_path,
+            "albums/track-a.flac"
+        );
+        assert_eq!(
+            state.history_log.entries[0].title,
+            Some("Track A".to_string())
+        );
+        assert_eq!(state.history_log.entries[0].duration_ms, Some(123_000));
+    }
+
+    #[test]
+    fn failed_play_after_enrich_rolls_back_recent_history_entry() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut outcome = {
+            let mut runtime = state.lock().unwrap();
+            runtime.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()))
+        };
+
+        {
+            let mut runtime = state.lock().unwrap();
+            assert!(runtime.enrich_current_track(&resolved_track(
+                "track-a",
+                "media-vol-1",
+                "albums/track-a.flac",
+                Some("Track A".to_string()),
+                Some(123_000),
+                "flac",
+            )));
+            assert_eq!(runtime.history_log.entries[0].volume_uuid, "media-vol-1");
+        }
+
+        apply_operation_failure(
+            Arc::clone(&state),
+            &mut outcome,
+            Some("track-a".to_string()),
+            PlaybackOperationError::content(
+                "track_file_missing",
+                "resolved media path is missing",
+                true,
+            ),
+        );
+
+        let runtime = state.lock().unwrap();
+        assert!(runtime.history_log.entries.is_empty());
+        assert_eq!(runtime.playback_state.as_str(), "quiet_error_hold");
+        assert!(!outcome.persist_history);
+    }
+
+    #[test]
+    fn output_failure_stops_instead_of_entering_quiet_error_hold() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut outcome = {
+            let mut runtime = state.lock().unwrap();
+            runtime.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()))
+        };
+
+        apply_operation_failure(
+            Arc::clone(&state),
+            &mut outcome,
+            Some("track-a".to_string()),
+            PlaybackOperationError::output(
+                "dsd_transport_unavailable",
+                "Native DSD / DoP unavailable",
+            ),
+        );
+
+        let runtime = state.lock().unwrap();
+        assert!(runtime.history_log.entries.is_empty());
+        assert_eq!(runtime.playback_state.as_str(), "stopped");
+        assert_eq!(runtime.current_track.as_deref(), Some("track-a"));
+        assert!(!outcome.persist_history);
+    }
+
+    #[test]
+    fn preflight_track_request_rejects_offline_volume_tracks() {
+        let db_path = temp_queue_path("preflight_offline_volume");
+        let connection = prepare_test_library_db(&db_path);
+        connection
+            .execute(
+                "INSERT INTO volumes (volume_uuid, mount_path, is_available, last_seen_at) VALUES (?1, ?2, ?3, ?4)",
+                ("vol-offline", "/media/offline", 0, 1_i64),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tracks (track_uid, volume_uuid, relative_path, filename, title, duration_ms, format, indexed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (
+                    "track-offline",
+                    "vol-offline",
+                    "albums/track.flac",
+                    "track.flac",
+                    "Track Offline",
+                    123_i64,
+                    "flac",
+                    1_i64,
+                ),
+            )
+            .unwrap();
+
+        let err = preflight_track_request(&TrackResolver::new(db_path.clone()), "track-offline")
+            .expect_err("offline volume should fail preflight");
+
+        assert_eq!(err.code, "track_volume_unavailable");
+        assert!(!err.keep_quiet);
+        cleanup_temp_path(&db_path);
+    }
+
+    #[test]
+    fn track_resolver_rejects_absolute_paths_by_default() {
+        let db_path = temp_queue_path("absolute_path_disabled_db");
+        let media_path = temp_queue_path("absolute_path_disabled_track.wav");
+        fs::write(&media_path, b"not real audio").unwrap();
+
+        let err = TrackResolver::new_with_absolute_path_playback(db_path.clone(), false)
+            .resolve(media_path.to_str().unwrap())
+            .expect_err("absolute path playback should be disabled by default");
+
+        assert_eq!(err.code, "absolute_path_playback_disabled");
+        assert!(!err.keep_quiet);
+        cleanup_temp_path(&db_path);
+        cleanup_temp_path(&media_path);
+    }
+
+    #[test]
+    fn track_resolver_allows_absolute_paths_only_when_explicitly_enabled() {
+        let db_path = temp_queue_path("absolute_path_enabled_db");
+        let media_path = temp_queue_path("absolute_path_enabled_track.wav");
+        fs::write(&media_path, b"not real audio").unwrap();
+
+        let track = TrackResolver::new_with_absolute_path_playback(db_path.clone(), true)
+            .resolve(media_path.to_str().unwrap())
+            .expect("absolute path playback should be available behind explicit dev flag");
+
+        assert_eq!(track.track_uid, media_path.to_string_lossy());
+        assert_eq!(track.volume_uuid, "manual-path");
+        assert_eq!(track.absolute_path, media_path);
+        cleanup_temp_path(&db_path);
+        cleanup_temp_path(&media_path);
+    }
+
+    #[test]
+    fn preflight_track_request_rejects_missing_paths_before_queue_mutation() {
+        let db_path = temp_queue_path("preflight_missing_path");
+        let mount_root = std::env::temp_dir().join("lumelo-missing-track-mount");
+        let connection = prepare_test_library_db(&db_path);
+        connection
+            .execute(
+                "INSERT INTO volumes (volume_uuid, mount_path, is_available, last_seen_at) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    "vol-online",
+                    mount_root.to_string_lossy().to_string(),
+                    1,
+                    1_i64,
+                ),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tracks (track_uid, volume_uuid, relative_path, filename, title, duration_ms, format, indexed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (
+                    "track-missing",
+                    "vol-online",
+                    "albums/missing.flac",
+                    "missing.flac",
+                    "Track Missing",
+                    123_i64,
+                    "flac",
+                    1_i64,
+                ),
+            )
+            .unwrap();
+
+        let err = preflight_track_request(&TrackResolver::new(db_path.clone()), "track-missing")
+            .expect_err("missing file should fail preflight");
+
+        assert_eq!(err.code, "track_file_missing");
+        assert!(!err.keep_quiet);
+        cleanup_temp_path(&db_path);
+    }
+
+    #[test]
+    fn playback_track_id_for_preflight_skips_paused_resume() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+        state.playback_state = ipc_proto::PlaybackState::Paused;
+        state.current_track = Some("track-a".to_string());
+
+        assert_eq!(
+            playback_track_id_for_preflight(
+                &state,
+                &ipc_proto::PlaybackCommand::Play("track-a".to_string())
+            ),
+            None
+        );
+        assert_eq!(
+            playback_track_id_for_preflight(
+                &state,
+                &ipc_proto::PlaybackCommand::Play("track-b".to_string())
+            ),
+            Some("track-b".to_string())
+        );
     }
 
     #[test]
@@ -2323,6 +3702,95 @@ mod tests {
     }
 
     #[test]
+    fn queue_play_replaces_queue_and_starts_first_track() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+
+        let outcome = state.apply_command(ipc_proto::PlaybackCommand::QueuePlay(vec![
+            "track-x".to_string(),
+            "track-y".to_string(),
+        ]));
+
+        assert_eq!(state.playback_state.as_str(), "quiet_active");
+        assert_eq!(state.current_track.as_deref(), Some("track-x"));
+        assert_eq!(state.snapshot.play_order.len(), 2);
+        assert_eq!(state.snapshot.current_order_index, Some(0));
+        assert_eq!(state.history_log.entries[0].track_uid, "track-x");
+        assert_eq!(
+            outcome.events,
+            vec![
+                ipc_proto::PlaybackEvent::PlayRequestAccepted {
+                    track_id: "track-x".to_string()
+                },
+                ipc_proto::PlaybackEvent::PlaybackStarted {
+                    track_id: "track-x".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn play_history_replaces_current_entry_and_preserves_following_queue() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::QueuePlay(vec![
+            "track-a".to_string(),
+            "track-b".to_string(),
+            "track-c".to_string(),
+        ]));
+        state.apply_command(ipc_proto::PlaybackCommand::Next);
+        state.snapshot.order_mode = OrderMode::Shuffle;
+        state.snapshot.repeat_mode = RepeatMode::All;
+        let play_order_before = state.snapshot.play_order.clone();
+        let current_queue_entry_id = play_order_before[1].clone();
+        let next_queue_entry_id = play_order_before[2].clone();
+        let queue_len_before = state.snapshot.tracks.len();
+
+        let outcome = state.apply_command(ipc_proto::PlaybackCommand::PlayHistory(
+            "history-track".to_string(),
+        ));
+
+        assert_eq!(state.playback_state.as_str(), "quiet_active");
+        assert_eq!(state.current_track.as_deref(), Some("history-track"));
+        assert_eq!(state.snapshot.current_order_index, Some(1));
+        assert_eq!(state.snapshot.play_order, play_order_before);
+        assert_eq!(state.snapshot.tracks.len(), queue_len_before);
+        assert_eq!(state.snapshot.order_mode, OrderMode::Shuffle);
+        assert_eq!(state.snapshot.repeat_mode, RepeatMode::All);
+        assert_eq!(
+            state
+                .snapshot
+                .tracks
+                .iter()
+                .find(|entry| entry.queue_entry_id == current_queue_entry_id)
+                .map(|entry| entry.track_uid.as_str()),
+            Some("history-track")
+        );
+        assert_eq!(
+            state
+                .snapshot
+                .tracks
+                .iter()
+                .find(|entry| entry.queue_entry_id == next_queue_entry_id)
+                .map(|entry| entry.track_uid.as_str()),
+            Some("track-c")
+        );
+        assert_eq!(state.history_log.entries[0].track_uid, "history-track");
+        assert!(outcome.persist_queue);
+        assert!(outcome.persist_history);
+        assert_eq!(
+            outcome.events,
+            vec![
+                ipc_proto::PlaybackEvent::PlayRequestAccepted {
+                    track_id: "history-track".to_string()
+                },
+                ipc_proto::PlaybackEvent::PlaybackStarted {
+                    track_id: "history-track".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn finished_track_advances_to_next_entry_and_records_history() {
         let mut state = RuntimeState::new();
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
@@ -2385,6 +3853,181 @@ mod tests {
     }
 
     #[test]
+    fn parse_dsd_output_policy_accepts_native_dsd_dop_and_legacy_aliases() {
+        assert_eq!(
+            parse_dsd_output_policy_from_config("dsd_output_policy = \"native_dsd\""),
+            Some(DsdOutputPolicy::NativeDsd)
+        );
+        assert_eq!(
+            parse_dsd_output_policy_from_config("dsd_output_policy = \"native_dop\""),
+            Some(DsdOutputPolicy::NativeDsd)
+        );
+        assert_eq!(
+            parse_dsd_output_policy_from_config("dsd_output_policy = \"dop\""),
+            Some(DsdOutputPolicy::Dop)
+        );
+        assert_eq!(
+            parse_dsd_output_policy_from_config("dsd_output_policy = \"strict_native\""),
+            Some(DsdOutputPolicy::NativeDsd)
+        );
+    }
+
+    #[test]
+    fn parse_alsa_stream_capabilities_collects_unique_formats_and_rates() {
+        let parsed = parse_alsa_stream_capabilities(
+            r#"
+Playback:
+  Interface 2
+    Altset 1
+    Format: S16_LE
+    Rates: 48000, 44100
+  Interface 2
+    Altset 2
+    Format: DSD_U32_LE
+    Rates: 88200
+  Interface 2
+    Altset 3
+    Format: S32_LE
+    Rates: 176400, 352800
+    "#,
+        );
+
+        assert_eq!(
+            parsed.formats,
+            vec![
+                "S16_LE".to_string(),
+                "DSD_U32_LE".to_string(),
+                "S32_LE".to_string()
+            ]
+        );
+        assert_eq!(parsed.rates, vec![48000, 44100, 88200, 176400, 352800]);
+    }
+
+    #[test]
+    fn usb_audio_output_devices_from_cards_selects_usb_dac() {
+        let devices = usb_audio_output_devices_from_cards(
+            r#" 0 [rockchiphdmi   ]: rockchip_hdmi - rockchip,hdmi
+                      rockchip,hdmi
+ 1 [realtekrt5651co]: realtek_rt5651- - realtek,rt5651-codec
+                      realtek,rt5651-codec
+ 2 [iBassoDC04Pro  ]: USB-Audio - iBasso-DC04-Pro
+                      ibasso iBasso-DC04-Pro at usb-xhci-hcd.0.auto-1, high speed
+"#,
+        );
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].card_index, 2);
+        assert_eq!(devices[0].card_id, "iBassoDC04Pro");
+        assert_eq!(devices[0].name, "ibasso iBasso-DC04-Pro");
+        assert_eq!(devices[0].alsa_device, "plughw:CARD=iBassoDC04Pro,DEV=0");
+    }
+
+    #[test]
+    fn select_unique_usb_audio_output_reports_no_dac() {
+        let err = select_unique_usb_audio_output(
+            r#" 0 [rockchiphdmi   ]: rockchip_hdmi - rockchip,hdmi
+                      rockchip,hdmi
+"#,
+        )
+        .expect_err("no USB DAC should be rejected");
+
+        assert_eq!(err.code, "audio_output_unavailable");
+    }
+
+    #[test]
+    fn select_unique_usb_audio_output_reports_multiple_dacs() {
+        let err = select_unique_usb_audio_output(
+            r#" 1 [Audio          ]: USB-Audio - USB Audio
+                      DAC One at usb-xhci-hcd.1.auto-1, high speed
+ 2 [Device         ]: USB-Audio - USB Audio Device
+                      DAC Two at usb-xhci-hcd.1.auto-2, full speed
+"#,
+        )
+        .expect_err("multiple USB DACs should be explicit");
+
+        assert_eq!(err.code, "audio_output_ambiguous");
+        assert!(err.reason.contains("DAC One"));
+        assert!(err.reason.contains("DAC Two"));
+    }
+
+    #[test]
+    fn select_native_dsd_plan_prefers_native_transport() {
+        let source = DsdSourceInfo {
+            channels: 2,
+            dsd_rate_hz: 2_822_400,
+        };
+        let capabilities = AlsaStreamCapabilities {
+            formats: vec!["DSD_U32_LE".to_string(), "S32_LE".to_string()],
+            rates: vec![88_200, 176_400],
+        };
+
+        let plan = select_native_dsd_plan(source, "plughw:CARD=Audio,DEV=0", &capabilities)
+            .expect("native plan should exist");
+
+        assert_eq!(plan.device, "hw:CARD=Audio,DEV=0");
+        assert_eq!(
+            plan.transport,
+            super::DsdTransport::Native(AlsaDsdFormat::U32Le)
+        );
+        assert_eq!(plan.sample_rate, 88_200);
+    }
+
+    #[test]
+    fn select_dop_plan_accepts_pcm_carrier_when_native_missing() {
+        let source = DsdSourceInfo {
+            channels: 2,
+            dsd_rate_hz: 5_644_800,
+        };
+        let capabilities = AlsaStreamCapabilities {
+            formats: vec!["S24_3LE".to_string()],
+            rates: vec![352_800],
+        };
+
+        let plan = select_dop_plan(source, "plughw:CARD=Audio,DEV=0", &capabilities)
+            .expect("dop plan should exist");
+
+        assert_eq!(plan.device, "hw:CARD=Audio,DEV=0");
+        assert_eq!(
+            plan.transport,
+            super::DsdTransport::Dop(DopPcmFormat::S24_3Le)
+        );
+        assert_eq!(plan.sample_rate, 352_800);
+    }
+
+    #[test]
+    fn select_pcm_fallback_plan_uses_s16le_44k1() {
+        let source = DsdSourceInfo {
+            channels: 2,
+            dsd_rate_hz: 2_822_400,
+        };
+        let capabilities = AlsaStreamCapabilities {
+            formats: vec!["S16_LE".to_string(), "S24_3LE".to_string()],
+            rates: vec![44_100, 48_000],
+        };
+
+        let plan = select_pcm_fallback_plan(source, "plughw:CARD=Audio,DEV=0", &capabilities)
+            .expect("pcm fallback plan should exist");
+
+        assert_eq!(plan.device, "hw:CARD=Audio,DEV=0");
+        assert_eq!(plan.transport, super::DsdTransport::Pcm);
+        assert_eq!(plan.sample_rate, 44_100);
+    }
+
+    #[test]
+    fn native_and_dop_packers_emit_expected_bytes() {
+        let mut native = Vec::new();
+        AlsaDsdFormat::U32Le.push_dsd_byte(0xA5, &mut native);
+        assert_eq!(native, vec![0xA5, 0x00, 0x00, 0x00]);
+
+        let mut dop = Vec::new();
+        DopPcmFormat::S24_3Le.push_dop_sample(0x12, 0x34, 0x05, &mut dop);
+        assert_eq!(dop, vec![0x12, 0x34, 0x05]);
+        dop.clear();
+        DopPcmFormat::S32Le.push_dop_sample(0x12, 0x34, 0xFA, &mut dop);
+        assert_eq!(dop, vec![0x12, 0x34, 0xFA, 0x00]);
+    }
+
+    #[test]
     fn history_log_is_capped_to_latest_limit() {
         let mut state = RuntimeState::new();
 
@@ -2436,6 +4079,66 @@ mod tests {
             title: Some(track_uid.to_string()),
             duration_ms: None,
         }
+    }
+
+    fn resolved_track(
+        track_uid: &str,
+        volume_uuid: &str,
+        relative_path: &str,
+        title: Option<String>,
+        duration_ms: Option<u64>,
+        format: &str,
+    ) -> ResolvedTrack {
+        ResolvedTrack {
+            track_uid: track_uid.to_string(),
+            volume_uuid: volume_uuid.to_string(),
+            relative_path: relative_path.to_string(),
+            title,
+            duration_ms,
+            format: format.to_string(),
+            absolute_path: PathBuf::from(format!("/tmp/{track_uid}.{format}")),
+        }
+    }
+
+    fn prepare_test_library_db(path: &PathBuf) -> Connection {
+        let _ = fs::remove_file(path);
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE volumes (
+                    volume_uuid TEXT PRIMARY KEY,
+                    label TEXT,
+                    mount_path TEXT NOT NULL,
+                    fs_type TEXT,
+                    is_available INTEGER NOT NULL DEFAULT 1,
+                    last_seen_at INTEGER NOT NULL
+                );
+                CREATE TABLE tracks (
+                    track_uid TEXT PRIMARY KEY,
+                    album_id INTEGER,
+                    volume_uuid TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    title TEXT,
+                    artist TEXT,
+                    album_artist TEXT,
+                    track_no INTEGER,
+                    disc_no INTEGER,
+                    duration_ms INTEGER,
+                    sample_rate INTEGER,
+                    bit_depth INTEGER,
+                    format TEXT,
+                    cover_ref_id INTEGER,
+                    musicbrainz_track_id TEXT,
+                    file_mtime INTEGER,
+                    indexed_at INTEGER NOT NULL,
+                    UNIQUE(volume_uuid, relative_path)
+                );
+                ",
+            )
+            .unwrap();
+        connection
     }
 
     fn queue_entry_id_by_track(state: &RuntimeState, track_uid: &str) -> String {

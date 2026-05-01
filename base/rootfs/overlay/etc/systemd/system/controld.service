@@ -7,7 +7,7 @@ ConditionPathExists=/usr/bin/controld
 [Service]
 Type=simple
 Environment=LUMELO_RUNTIME_DIR=/run/lumelo
-Environment=CONTROLD_LISTEN_ADDR=0.0.0.0:18080
+Environment=CONTROLD_LISTEN_ADDR=0.0.0.0:80
 ExecStart=/usr/bin/controld
 Restart=on-failure
 RestartSec=2

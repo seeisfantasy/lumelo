@@ -5,6 +5,7 @@
 
 services/rust/target/
 services/controld/controld
+services/controld/.tmp/
 apps/android-provisioning/.gradle/
 apps/android-provisioning/build/
 apps/android-provisioning/local.properties

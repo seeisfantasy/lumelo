@@ -40,6 +40,17 @@ stat_mode() {
   stat -c '%a' "$1"
 }
 
+install_mode_for_remote_path() {
+  case "$1" in
+    /etc/systemd/network/*|/etc/systemd/system/*|/usr/lib/systemd/system/*|/etc/systemd/resolved.conf.d/*|/etc/systemd/dnssd/*)
+      printf '0644\n'
+      ;;
+    *)
+      stat_mode "$2"
+      ;;
+  esac
+}
+
 append_newline() {
   if [ -z "$1" ]; then
     printf '%s' "$2"
@@ -148,7 +159,7 @@ for source_arg in "$@"; do
   remote_path="/${relative_path}"
   remote_dir=$(dirname "${remote_path}")
   remote_tmp="${tmp_root}/$(basename "${remote_path}")"
-  mode=$(stat_mode "${source_path}")
+  mode=$(install_mode_for_remote_path "${remote_path}" "${source_path}")
 
   printf 'Deploying %s -> %s:%s\n' "${relative_path}" "${remote}" "${remote_path}"
   scp_cmd "${source_path}" "${remote}:${remote_tmp}"
@@ -192,7 +203,7 @@ if [ -n "${mapped_entries}" ]; then
 
     remote_dir=$(dirname "${remote_path}")
     remote_tmp="${tmp_root}/$(basename "${remote_path}")"
-    mode=$(stat_mode "${local_path}")
+    mode=$(install_mode_for_remote_path "${remote_path}" "${local_path}")
 
     printf 'Deploying mapped artifact %s -> %s:%s\n' "${local_path}" "${remote}" "${remote_path}"
     scp_cmd "${local_path}" "${remote}:${remote_tmp}"

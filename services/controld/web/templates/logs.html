@@ -1,43 +1,118 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Lumelo logs</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    <title>Lumelo 日志</title>
+    {{if .InlineCSS}}<style>{{.InlineCSS}}</style>{{else}}<link rel="stylesheet" href="/static/css/app.css">{{end}}
   </head>
-  <body>
-    <main class="shell">
+  <body class="app-body">
+    <main class="shell shell-diagnostics">
       <nav class="topnav">
-        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
-        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
-        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
-        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+        <div class="topnav-brand">
+          <p class="eyebrow">诊断</p>
+          <p class="topnav-title">运行日志</p>
+          <p class="topnav-copy">
+            保留便于复制的 journal 输出，用于 bring-up、smoke test 和快速问题回报。
+          </p>
+        </div>
+        <div class="topnav-links">
+          <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">首页</a>
+          <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">曲库</a>
+          <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">设置</a>
+          <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">日志</a>
+        </div>
       </nav>
 
-      <section class="card">
-        <p class="eyebrow">Lumelo bring-up</p>
-        <h1>System logs</h1>
+      <section class="card page-hero page-main">
+        <p class="eyebrow">日志</p>
+        <h1>系统日志</h1>
         <p class="summary">
-          This page reads the current boot journal on demand so you can copy the
-          latest runtime logs during T4 bring-up without opening an SSH session.
+          这里按需读取当前启动周期的 journal，方便在 T4 bring-up 时不进 SSH 也能直接复制最近日志。
         </p>
+        <div class="actions hero-actions">
+          <a href="{{.LogTextPath}}" class="button-link">打开纯文本</a>
+          <a href="/logs?lines=300" class="button-link button-link-secondary">300 行</a>
+          <a href="/provisioning" class="button-link button-link-secondary">打开设置</a>
+        </div>
       </section>
 
-      <section class="card">
-        <h2>Copy Logs</h2>
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">概览</p>
+            <h2>日志摘要</h2>
+          </div>
+          <p class="summary section-summary">
+            先把导出路径放清楚，再把完整 journal 放在下面，方便直接复制和转发。
+          </p>
+        </div>
+        <div class="overview-grid">
+          <article class="overview-tile">
+            <p class="overview-label">范围</p>
+            <p class="overview-value">{{.Lines}}</p>
+            <p class="overview-meta">请求的日志行数</p>
+          </article>
+          <article class="overview-tile">
+            <p class="overview-label">来源</p>
+            <p class="overview-value">journalctl -b</p>
+            <p class="overview-meta">仅当前启动周期</p>
+          </article>
+          <article class="overview-tile">
+            <p class="overview-label">格式</p>
+            <p class="overview-value">纯文本</p>
+            <p class="overview-meta">专门为复制设计</p>
+          </article>
+          <article class="overview-tile">
+            <p class="overview-label">用途</p>
+            <p class="overview-value">排障</p>
+            <p class="overview-meta">快速问题交接</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">操作</p>
+            <h2>复制日志</h2>
+          </div>
+          <p class="summary section-summary">
+            先选合适的导出大小，再复制下面渲染出来的 journal 内容。
+          </p>
+        </div>
         {{if .LogError}}
-          <p class="banner banner-error">Log read error: {{.LogError}}</p>
+          <p class="banner banner-error">日志读取失败：{{.LogError}}</p>
         {{end}}
-        <p class="summary">
-          Showing the latest {{.Lines}} lines from <code>journalctl -b</code>.
-          Use the plain-text view if you want the easiest copy/paste payload.
-        </p>
-        <div class="actions log-actions">
-          <a href="{{.LogTextPath}}" class="button-link">Open plain text</a>
-          <a href="/logs?lines=100" class="button-link button-link-secondary">100 lines</a>
-          <a href="/logs?lines=300" class="button-link button-link-secondary">300 lines</a>
-          <a href="/logs?lines=1000" class="button-link button-link-secondary">1000 lines</a>
+        <div class="diagnostic-layout">
+          <div class="diagnostic-subcard">
+            <p class="eyebrow">复制路径</p>
+            <p class="summary section-summary">
+              当前展示的是 <code>journalctl -b</code> 最近 {{.Lines}} 行。
+              如果你想要最容易复制的内容，直接打开纯文本视图。
+            </p>
+            <div class="actions log-actions">
+              <a href="{{.LogTextPath}}" class="button-link">打开纯文本</a>
+              <a href="/logs?lines=100" class="button-link button-link-secondary">100 行</a>
+              <a href="/logs?lines=300" class="button-link button-link-secondary">300 行</a>
+              <a href="/logs?lines=1000" class="button-link button-link-secondary">1000 行</a>
+            </div>
+          </div>
+          <div class="diagnostic-subcard">
+            <p class="eyebrow">说明</p>
+            <p class="summary section-summary">
+              这页会刻意保持简单。它服务于复制粘贴、回归记录和快速排障，不做日志分析。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">日志</p>
+            <h2>渲染输出</h2>
+          </div>
         </div>
         <pre class="log-output">{{.LogText}}</pre>
       </section>

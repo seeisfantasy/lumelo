@@ -20,8 +20,41 @@ import java.security.GeneralSecurityException;
 import java.util.UUID;
 
 final class ClassicBluetoothTransport {
+    private static final String ACK_CREDENTIALS_RECEIVED = "credentials received";
+    private static final String ACK_APPLY_STARTED = "apply started";
+    private static final long ACK_TIMEOUT_MS = 8_000;
+    private static final long AUTO_RECONNECT_DELAY_MS = 1_500;
+    private static final long POST_STATUS_RECONNECT_GRACE_MS = 10_000;
+    private static final int MAX_ACK_RETRIES = 1;
+    private static final int MAX_AUTO_RECONNECTS = 1;
+
+    private enum AckWaitState {
+        IDLE,
+        CREDENTIALS,
+        APPLY
+    }
+
+    private enum ProvisioningStage {
+        IDLE,
+        WAITING_CREDENTIAL_ACK,
+        WAITING_APPLY_ACK,
+        WAITING_STATUS
+    }
+
+    private static final class PendingProvisioning {
+        final String ssid;
+        final String password;
+
+        PendingProvisioning(String ssid, String password) {
+            this.ssid = ssid;
+            this.password = password;
+        }
+    }
+
     interface Listener {
         void onClassicConnected(BluetoothDevice device);
+
+        void onClassicReconnecting(String message);
 
         void onClassicDisconnected(String message);
 
@@ -42,10 +75,25 @@ final class ClassicBluetoothTransport {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private BluetoothSocket socket;
+    private BluetoothSocket pendingSocket;
     private BufferedWriter writer;
     private Thread readerThread;
     private volatile boolean disconnectRequested;
+    private volatile boolean recoveryCloseRequested;
     private volatile ProvisioningSecurity.Session credentialSecuritySession;
+    private volatile boolean applyPendingAfterCredentialAck;
+    private volatile boolean connectInProgress;
+    private AckWaitState ackWaitState = AckWaitState.IDLE;
+    private Runnable ackTimeoutRunnable;
+    private BluetoothDevice activeDevice;
+    private PendingProvisioning pendingProvisioning;
+    private ProvisioningStage provisioningStage = ProvisioningStage.IDLE;
+    private int credentialAckRetryCount;
+    private int applyAckRetryCount;
+    private boolean statusRecoveryPending;
+    private int autoReconnectAttemptsRemaining = MAX_AUTO_RECONNECTS;
+    private long connectAttemptSerial;
+    private long reconnectGraceDeadlineMs;
 
     ClassicBluetoothTransport(Listener listener) {
         this.listener = listener;
@@ -57,20 +105,33 @@ final class ClassicBluetoothTransport {
 
     @SuppressLint("MissingPermission")
     void connect(BluetoothDevice device) {
+        long attemptId;
         disconnect();
-        disconnectRequested = false;
-        credentialSecuritySession = null;
-        new Thread(() -> connectInBackground(device), "LumeloClassicConnect").start();
+        synchronized (this) {
+            activeDevice = device;
+            disconnectRequested = false;
+            credentialSecuritySession = null;
+            applyPendingAfterCredentialAck = false;
+            clearPendingProvisioningLocked();
+            clearAckTimeoutLocked();
+            reconnectGraceDeadlineMs = 0L;
+            connectInProgress = true;
+            autoReconnectAttemptsRemaining = MAX_AUTO_RECONNECTS;
+            connectAttemptSerial += 1;
+            attemptId = connectAttemptSerial;
+        }
+        new Thread(() -> connectInBackground(device, attemptId), "LumeloClassicConnect").start();
     }
 
-    private void connectInBackground(BluetoothDevice device) {
+    private void connectInBackground(BluetoothDevice device, long attemptId) {
         IOException lastFailure = null;
         BluetoothSocket candidate = null;
         lastFailure = null;
 
         candidate = tryConnectAttempt(
                 "trying insecure RFCOMM",
-                () -> device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                () -> device.createInsecureRfcommSocketToServiceRecord(SPP_UUID),
+                attemptId
         );
         if (candidate == null) {
             lastFailure = lastAttemptFailure;
@@ -79,7 +140,8 @@ final class ClassicBluetoothTransport {
         if (candidate == null) {
             candidate = tryConnectAttempt(
                     "falling back to secure RFCOMM",
-                    () -> device.createRfcommSocketToServiceRecord(SPP_UUID)
+                    () -> device.createRfcommSocketToServiceRecord(SPP_UUID),
+                    attemptId
             );
             if (candidate == null) {
                 lastFailure = lastAttemptFailure;
@@ -89,7 +151,8 @@ final class ClassicBluetoothTransport {
         if (candidate == null) {
             candidate = tryConnectAttempt(
                     "falling back to insecure RFCOMM channel 1",
-                    () -> createChannelSocket(device, "createInsecureRfcommSocket", RFCOMM_CHANNEL)
+                    () -> createChannelSocket(device, "createInsecureRfcommSocket", RFCOMM_CHANNEL),
+                    attemptId
             );
             if (candidate == null) {
                 lastFailure = lastAttemptFailure;
@@ -99,7 +162,8 @@ final class ClassicBluetoothTransport {
         if (candidate == null) {
             candidate = tryConnectAttempt(
                     "falling back to secure RFCOMM channel 1",
-                    () -> createChannelSocket(device, "createRfcommSocket", RFCOMM_CHANNEL)
+                    () -> createChannelSocket(device, "createRfcommSocket", RFCOMM_CHANNEL),
+                    attemptId
             );
             if (candidate == null) {
                 lastFailure = lastAttemptFailure;
@@ -107,12 +171,13 @@ final class ClassicBluetoothTransport {
         }
 
         if (candidate == null) {
-            String message = "Classic Bluetooth connect failed";
-            if (lastFailure != null && lastFailure.getMessage() != null && !lastFailure.getMessage().isEmpty()) {
-                message += ": " + lastFailure.getMessage();
+            if (isConnectCanceled(attemptId)) {
+                clearConnectInProgress(attemptId);
+                return;
             }
+            clearConnectInProgress(attemptId);
+            String message = formatConnectFailureMessage(lastFailure);
             postError(message);
-            postDisconnected("Disconnected from T4.");
             return;
         }
 
@@ -128,13 +193,18 @@ final class ClassicBluetoothTransport {
         } catch (IOException exception) {
             closeQuietly(candidate);
             postError("Classic Bluetooth stream setup failed: " + exception.getMessage());
-            postDisconnected("Disconnected from T4.");
             return;
         }
 
         synchronized (this) {
+            if (disconnectRequested || attemptId != connectAttemptSerial) {
+                clearConnectInProgress(attemptId);
+                closeQuietly(candidate);
+                return;
+            }
             socket = candidate;
             writer = connectedWriter;
+            connectInProgress = false;
         }
 
         post(() -> listener.onClassicConnected(device));
@@ -149,21 +219,78 @@ final class ClassicBluetoothTransport {
 
     private IOException lastAttemptFailure;
 
-    private BluetoothSocket tryConnectAttempt(String label, SocketFactory factory) {
+    private String formatConnectFailureMessage(IOException lastFailure) {
+        String detail = "";
+        if (lastFailure != null && lastFailure.getMessage() != null) {
+            detail = lastFailure.getMessage().trim();
+        }
+        StringBuilder message = new StringBuilder(
+                "Classic Bluetooth connect failed after RFCOMM fallback. "
+                        + "Lumelo was discovered, but the provisioning service did not answer."
+        );
+        if (!detail.isEmpty()) {
+            message.append(" Last error: ").append(detail);
+        }
+        return message.toString();
+    }
+
+    private BluetoothSocket tryConnectAttempt(String label, SocketFactory factory, long attemptId) {
+        if (isConnectCanceled(attemptId)) {
+            return null;
+        }
         BluetoothSocket candidate = null;
         try {
             postLog("Classic Bluetooth connect: " + label);
             candidate = factory.create();
+            synchronized (this) {
+                if (disconnectRequested || attemptId != connectAttemptSerial) {
+                    closeQuietly(candidate);
+                    return null;
+                }
+                pendingSocket = candidate;
+            }
             candidate.connect();
+            synchronized (this) {
+                if (pendingSocket == candidate) {
+                    pendingSocket = null;
+                }
+            }
+            if (isConnectCanceled(attemptId)) {
+                closeQuietly(candidate);
+                return null;
+            }
             lastAttemptFailure = null;
             return candidate;
         } catch (Exception exception) {
+            synchronized (this) {
+                if (pendingSocket == candidate) {
+                    pendingSocket = null;
+                }
+            }
             closeQuietly(candidate);
             lastAttemptFailure = toIoException(label, exception);
             postLog("Classic Bluetooth connect attempt failed (" + label + "): "
                     + lastAttemptFailure.getMessage());
             return null;
         }
+    }
+
+    private boolean isConnectCanceled(long attemptId) {
+        synchronized (this) {
+            return disconnectRequested || attemptId != connectAttemptSerial;
+        }
+    }
+
+    private void clearConnectInProgress(long attemptId) {
+        synchronized (this) {
+            if (attemptId == connectAttemptSerial) {
+                connectInProgress = false;
+            }
+        }
+    }
+
+    synchronized boolean isConnectInProgress() {
+        return connectInProgress;
     }
 
     private BluetoothSocket createChannelSocket(BluetoothDevice device, String methodName, int channel)
@@ -197,6 +324,7 @@ final class ClassicBluetoothTransport {
     }
 
     private void readLoop(BluetoothSocket activeSocket, BufferedReader reader) {
+        String reconnectMessage = "Classic Bluetooth session lost. Reconnecting to T4...";
         try {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -206,19 +334,47 @@ final class ClassicBluetoothTransport {
                 handleIncomingLine(line);
             }
         } catch (IOException exception) {
-            if (!disconnectRequested) {
+            if (!disconnectRequested && !recoveryCloseRequested) {
                 postError("Classic Bluetooth read failed: " + exception.getMessage());
             }
         } finally {
             boolean notifyDisconnect = !disconnectRequested;
+            boolean shouldReconnect = false;
+            long reconnectAttemptId = 0L;
+            BluetoothDevice reconnectDevice = null;
             synchronized (this) {
+                boolean recoveryCloseActive = recoveryCloseRequested;
+                recoveryCloseRequested = false;
                 if (socket == activeSocket) {
                     socket = null;
                     writer = null;
                 }
+                connectInProgress = false;
+                if (notifyDisconnect) {
+                    shouldReconnect = shouldAutoReconnectLocked();
+                    if (shouldReconnect) {
+                        reconnectMessage = recoveryCloseActive
+                                ? "Classic Bluetooth write failed. Reconnecting to T4..."
+                                : "Classic Bluetooth session lost. Reconnecting to T4...";
+                        reconnectAttemptId = beginReconnectLocked(reconnectMessage);
+                        reconnectDevice = activeDevice;
+                        notifyDisconnect = false;
+                    }
+                }
             }
             credentialSecuritySession = null;
+            applyPendingAfterCredentialAck = false;
+            if (!shouldReconnect) {
+                clearAckTimeout();
+            }
             closeQuietly(activeSocket);
+            if (shouldReconnect) {
+                scheduleReconnectAttempt(
+                        reconnectDevice,
+                        reconnectAttemptId,
+                        reconnectMessage
+                );
+            }
             if (notifyDisconnect) {
                 postDisconnected("Disconnected from T4.");
             }
@@ -256,10 +412,32 @@ final class ClassicBluetoothTransport {
                 return;
             }
             if ("ack".equals(type)) {
-                postLog("Classic Bluetooth ack: " + message.optString("message"));
+                String ackMessage = message.optString("message");
+                boolean shouldSendApply = false;
+                if (ACK_CREDENTIALS_RECEIVED.equals(ackMessage) && applyPendingAfterCredentialAck) {
+                    clearAckTimeout(AckWaitState.CREDENTIALS);
+                    applyPendingAfterCredentialAck = false;
+                    provisioningStage = ProvisioningStage.WAITING_APPLY_ACK;
+                    statusRecoveryPending = false;
+                    shouldSendApply = true;
+                } else if (ACK_APPLY_STARTED.equals(ackMessage)) {
+                    clearAckTimeout(AckWaitState.APPLY);
+                    applyPendingAfterCredentialAck = false;
+                    provisioningStage = ProvisioningStage.WAITING_STATUS;
+                    statusRecoveryPending = false;
+                }
+                postLog("Classic Bluetooth ack: " + ackMessage);
+                if (shouldSendApply) {
+                    if (sendApplyCommand()) {
+                        provisioningStage = ProvisioningStage.WAITING_APPLY_ACK;
+                    }
+                }
                 return;
             }
             if ("error".equals(type)) {
+                clearAckTimeout();
+                applyPendingAfterCredentialAck = false;
+                clearPendingProvisioning();
                 String errorMessage = message.optString("message");
                 if (errorMessage.isEmpty()) {
                     errorMessage = line;
@@ -274,6 +452,7 @@ final class ClassicBluetoothTransport {
                 return;
             }
             if ("status".equals(type) && payload != null) {
+                handleStatusPayload(payload);
                 post(() -> listener.onClassicStatus(payload.toString()));
                 return;
             }
@@ -284,25 +463,40 @@ final class ClassicBluetoothTransport {
         }
     }
 
-    void requestDeviceInfo() {
-        sendSimpleCommand("device_info");
+    boolean requestDeviceInfo() {
+        return sendSimpleCommand("device_info");
     }
 
-    void requestStatus() {
-        sendSimpleCommand("status");
+    boolean requestStatus() {
+        return sendSimpleCommand("status");
     }
 
     void sendCredentials(String ssid, String password) {
+        PendingProvisioning provisioning = new PendingProvisioning(ssid, password);
+        synchronized (this) {
+            pendingProvisioning = provisioning;
+            provisioningStage = ProvisioningStage.WAITING_CREDENTIAL_ACK;
+            credentialAckRetryCount = 0;
+            applyAckRetryCount = 0;
+            statusRecoveryPending = false;
+            autoReconnectAttemptsRemaining = MAX_AUTO_RECONNECTS;
+        }
+        if (!sendEncryptedCredentials(provisioning)) {
+            clearPendingProvisioning();
+        }
+    }
+
+    private boolean sendEncryptedCredentials(PendingProvisioning provisioning) {
         try {
             ProvisioningSecurity.Session securitySession = credentialSecuritySession;
             if (securitySession == null) {
                 postError("Classic Bluetooth secure credential transport is unavailable. "
                         + "Update the T4 provisioning daemon before sending Wi-Fi credentials.");
-                return;
+                return false;
             }
 
             ProvisioningSecurity.EncryptedPayload encryptedPayload =
-                    ProvisioningSecurity.encryptCredentials(securitySession, ssid, password);
+                    ProvisioningSecurity.encryptCredentials(securitySession, provisioning.ssid, provisioning.password);
             JSONObject secureMessage = new JSONObject();
             JSONObject payload = new JSONObject();
             payload.put("scheme", encryptedPayload.scheme);
@@ -315,43 +509,308 @@ final class ClassicBluetoothTransport {
             payload.put("mac", encryptedPayload.mac);
             secureMessage.put("type", "wifi_credentials_encrypted");
             secureMessage.put("payload", payload);
-            sendMessage(secureMessage);
-            postLog("Classic Bluetooth credential transport: encrypted payload queued for SSID " + ssid);
-            sendSimpleCommand("apply");
+            applyPendingAfterCredentialAck = true;
+            if (!sendMessage(secureMessage)) {
+                applyPendingAfterCredentialAck = false;
+                return false;
+            }
+            scheduleAckTimeout(AckWaitState.CREDENTIALS);
+            postLog("Classic Bluetooth credential transport: encrypted payload queued for SSID "
+                    + provisioning.ssid);
+            return true;
         } catch (JSONException | GeneralSecurityException exception) {
+            clearAckTimeout();
+            applyPendingAfterCredentialAck = false;
             postError("Failed to build Classic Bluetooth credential payload: " + exception.getMessage());
+            return false;
         }
     }
 
     void disconnect() {
         disconnectRequested = true;
         BluetoothSocket currentSocket;
+        BluetoothSocket currentPendingSocket;
         synchronized (this) {
             currentSocket = socket;
+            currentPendingSocket = pendingSocket;
             socket = null;
+            pendingSocket = null;
             writer = null;
+            connectInProgress = false;
+            connectAttemptSerial += 1;
+            activeDevice = null;
+            reconnectGraceDeadlineMs = 0L;
+            clearPendingProvisioningLocked();
         }
+        credentialSecuritySession = null;
+        applyPendingAfterCredentialAck = false;
+        clearAckTimeout();
         closeQuietly(currentSocket);
+        closeQuietly(currentPendingSocket);
     }
 
-    private void sendSimpleCommand(String type) {
+    private boolean sendApplyCommand() {
+        if (!sendSimpleCommand("apply")) {
+            return false;
+        }
+        scheduleAckTimeout(AckWaitState.APPLY);
+        return true;
+    }
+
+    private boolean isReconnectGraceActiveLocked() {
+        return reconnectGraceDeadlineMs > System.currentTimeMillis();
+    }
+
+    private boolean shouldAutoReconnectLocked() {
+        return !disconnectRequested
+                && activeDevice != null
+                && (isReconnectGraceActiveLocked()
+                || (pendingProvisioning != null && provisioningStage != ProvisioningStage.IDLE))
+                && autoReconnectAttemptsRemaining > 0;
+    }
+
+    private long beginReconnectLocked(String message) {
+        autoReconnectAttemptsRemaining -= 1;
+        clearAckTimeoutLocked();
+        credentialSecuritySession = null;
+        applyPendingAfterCredentialAck = false;
+        statusRecoveryPending = true;
+        connectInProgress = true;
+        connectAttemptSerial += 1;
+        postLog(message);
+        return connectAttemptSerial;
+    }
+
+    private void clearPendingProvisioning() {
+        synchronized (this) {
+            clearPendingProvisioningLocked();
+        }
+    }
+
+    private void clearPendingProvisioningLocked() {
+        pendingProvisioning = null;
+        provisioningStage = ProvisioningStage.IDLE;
+        credentialAckRetryCount = 0;
+        applyAckRetryCount = 0;
+        statusRecoveryPending = false;
+    }
+
+    private void scheduleAckTimeout(AckWaitState state) {
+        Runnable timeoutRunnable = () -> handleAckTimeout(state);
+        synchronized (this) {
+            clearAckTimeoutLocked();
+            ackWaitState = state;
+            ackTimeoutRunnable = timeoutRunnable;
+            mainHandler.postDelayed(timeoutRunnable, ACK_TIMEOUT_MS);
+        }
+    }
+
+    private void clearAckTimeout() {
+        synchronized (this) {
+            clearAckTimeoutLocked();
+        }
+    }
+
+    private void clearAckTimeout(AckWaitState expectedState) {
+        synchronized (this) {
+            if (ackWaitState != expectedState) {
+                return;
+            }
+            clearAckTimeoutLocked();
+        }
+    }
+
+    private void clearAckTimeoutLocked() {
+        if (ackTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(ackTimeoutRunnable);
+            ackTimeoutRunnable = null;
+        }
+        ackWaitState = AckWaitState.IDLE;
+    }
+
+    private void handleAckTimeout(AckWaitState expectedState) {
+        PendingProvisioning provisioningToRetry = null;
+        boolean shouldRetryApply = false;
+        boolean shouldRequestStatus = false;
+        boolean shouldReconnect = false;
+        long reconnectAttemptId = 0L;
+        synchronized (this) {
+            if (ackWaitState != expectedState || ackTimeoutRunnable == null) {
+                return;
+            }
+            ackTimeoutRunnable = null;
+            ackWaitState = AckWaitState.IDLE;
+            applyPendingAfterCredentialAck = false;
+            if (expectedState == AckWaitState.CREDENTIALS
+                    && pendingProvisioning != null
+                    && credentialAckRetryCount < MAX_ACK_RETRIES) {
+                credentialAckRetryCount += 1;
+                provisioningToRetry = pendingProvisioning;
+            } else if (expectedState == AckWaitState.APPLY && applyAckRetryCount < MAX_ACK_RETRIES) {
+                applyAckRetryCount += 1;
+                shouldRetryApply = true;
+            } else if (shouldAutoReconnectLocked()) {
+                reconnectAttemptId = beginReconnectLocked(
+                        "Classic Bluetooth ack timeout. Reconnecting to T4..."
+                );
+                shouldReconnect = true;
+            } else {
+                statusRecoveryPending = true;
+                shouldRequestStatus = true;
+            }
+        }
+        String expectedAck = expectedState == AckWaitState.CREDENTIALS
+                ? ACK_CREDENTIALS_RECEIVED
+                : ACK_APPLY_STARTED;
+        if (provisioningToRetry != null) {
+            postLog("Classic Bluetooth ack timeout for " + expectedAck + "; retrying encrypted credentials");
+            if (sendEncryptedCredentials(provisioningToRetry)) {
+                return;
+            }
+            shouldRequestStatus = true;
+        }
+        if (shouldRetryApply) {
+            postLog("Classic Bluetooth ack timeout for " + expectedAck + "; retrying apply");
+            if (sendApplyCommand()) {
+                return;
+            }
+            shouldRequestStatus = true;
+        }
+        if (shouldReconnect) {
+            postError("Classic Bluetooth timed out waiting for ack: " + expectedAck);
+            BluetoothDevice reconnectDevice;
+            synchronized (this) {
+                reconnectDevice = activeDevice;
+            }
+            scheduleReconnectAttempt(
+                    reconnectDevice,
+                    reconnectAttemptId,
+                    "Classic Bluetooth ack timeout. Reconnecting to T4..."
+            );
+            return;
+        }
+        postError("Classic Bluetooth timed out waiting for ack: " + expectedAck);
+        if (shouldRequestStatus && !requestStatus()) {
+            postLog("Classic Bluetooth recovery status request could not start after ack timeout");
+        }
+    }
+
+    private void scheduleReconnectAttempt(BluetoothDevice device, long attemptId, String message) {
+        post(() -> listener.onClassicReconnecting(message));
+        if (device == null) {
+            return;
+        }
+        mainHandler.postDelayed(
+                () -> new Thread(
+                        () -> connectInBackground(device, attemptId),
+                        "LumeloClassicReconnect"
+                ).start(),
+                AUTO_RECONNECT_DELAY_MS
+        );
+    }
+
+    private void handleStatusPayload(JSONObject payload) {
+        String state = payload.optString("state");
+        if (state.isEmpty()) {
+            return;
+        }
+
+        boolean shouldSendCredentials = false;
+        boolean shouldSendApply = false;
+        PendingProvisioning provisioning = null;
+
+        synchronized (this) {
+            if ("connected".equals(state) || "failed".equals(state)) {
+                clearAckTimeoutLocked();
+                applyPendingAfterCredentialAck = false;
+                reconnectGraceDeadlineMs = System.currentTimeMillis() + POST_STATUS_RECONNECT_GRACE_MS;
+                autoReconnectAttemptsRemaining = MAX_AUTO_RECONNECTS;
+                clearPendingProvisioningLocked();
+                return;
+            }
+            if ("applying".equals(state) || "waiting_for_ip".equals(state)) {
+                clearAckTimeoutLocked();
+                applyPendingAfterCredentialAck = false;
+                provisioningStage = ProvisioningStage.WAITING_STATUS;
+                statusRecoveryPending = false;
+                return;
+            }
+            if (pendingProvisioning == null) {
+                return;
+            }
+
+            provisioning = pendingProvisioning;
+            if ("credentials_ready".equals(state)) {
+                clearAckTimeoutLocked();
+                applyPendingAfterCredentialAck = false;
+                if (provisioningStage == ProvisioningStage.WAITING_CREDENTIAL_ACK) {
+                    shouldSendApply = true;
+                    provisioningStage = ProvisioningStage.WAITING_APPLY_ACK;
+                    statusRecoveryPending = false;
+                } else if (statusRecoveryPending
+                        && (provisioningStage == ProvisioningStage.WAITING_CREDENTIAL_ACK
+                        || provisioningStage == ProvisioningStage.WAITING_APPLY_ACK
+                        || provisioningStage == ProvisioningStage.WAITING_STATUS)) {
+                    shouldSendApply = true;
+                    provisioningStage = ProvisioningStage.WAITING_APPLY_ACK;
+                    statusRecoveryPending = false;
+                }
+            }
+
+            if (statusRecoveryPending
+                    && ("idle".equals(state) || "advertising".equals(state))
+                    && provisioningStage != ProvisioningStage.IDLE) {
+                shouldSendCredentials = true;
+                provisioningStage = ProvisioningStage.WAITING_CREDENTIAL_ACK;
+                statusRecoveryPending = false;
+            }
+        }
+
+        if (shouldSendApply) {
+            postLog("Classic Bluetooth recovery: credentials are already present; sending apply");
+            sendApplyCommand();
+            return;
+        }
+        if (shouldSendCredentials && provisioning != null) {
+            postLog("Classic Bluetooth recovery: resending encrypted credentials after status check");
+            sendEncryptedCredentials(provisioning);
+        }
+    }
+
+    synchronized String debugSummary() {
+        String deviceLabel = activeDevice == null ? "(none)" : activeDevice.getAddress();
+        return "connected=" + isConnected()
+                + ", connectInProgress=" + connectInProgress
+                + ", stage=" + provisioningStage
+                + ", ackWait=" + ackWaitState
+                + ", pendingProvisioning=" + (pendingProvisioning != null ? "yes" : "no")
+                + ", credentialRetries=" + credentialAckRetryCount + "/" + MAX_ACK_RETRIES
+                + ", applyRetries=" + applyAckRetryCount + "/" + MAX_ACK_RETRIES
+                + ", reconnectsLeft=" + autoReconnectAttemptsRemaining
+                + ", reconnectGraceActive=" + isReconnectGraceActiveLocked()
+                + ", statusRecoveryPending=" + statusRecoveryPending
+                + ", device=" + deviceLabel;
+    }
+
+    private boolean sendSimpleCommand(String type) {
         try {
             JSONObject message = new JSONObject();
             message.put("type", type);
-            sendMessage(message);
+            return sendMessage(message);
         } catch (JSONException exception) {
             postError("Failed to build Classic Bluetooth command: " + type);
+            return false;
         }
     }
 
-    private void sendMessage(JSONObject message) {
+    private boolean sendMessage(JSONObject message) {
         BufferedWriter currentWriter;
         synchronized (this) {
             currentWriter = writer;
         }
         if (currentWriter == null) {
             postError("Classic Bluetooth session is not connected.");
-            return;
+            return false;
         }
 
         try {
@@ -359,10 +818,17 @@ final class ClassicBluetoothTransport {
             currentWriter.write("\n");
             currentWriter.flush();
             postLog("Classic Bluetooth send: " + message.optString("type"));
+            return true;
         } catch (IOException exception) {
             postError("Classic Bluetooth write failed: " + exception.getMessage());
-            disconnect();
-            postDisconnected("Disconnected from T4.");
+            BluetoothSocket currentSocket;
+            synchronized (this) {
+                recoveryCloseRequested = true;
+                currentSocket = socket;
+                writer = null;
+            }
+            closeQuietly(currentSocket);
+            return false;
         }
     }
 
@@ -388,7 +854,8 @@ final class ClassicBluetoothTransport {
         }
         try {
             currentSocket.close();
-        } catch (IOException ignored) {
+        } catch (IOException exception) {
+            postLog("Classic Bluetooth socket close failed: " + exception.getClass().getSimpleName());
         }
     }
 }

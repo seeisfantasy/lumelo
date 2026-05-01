@@ -29,6 +29,7 @@ final class ProvisioningSecurity {
                     + "FFFFFFFF";
     private static final BigInteger DH_PRIME = new BigInteger(DH_PRIME_HEX, 16);
     private static final BigInteger DH_GENERATOR = BigInteger.valueOf(2L);
+    private static final BigInteger BIGINT_TWO = BigInteger.valueOf(2L);
     private static final int DH_PUBLIC_KEY_BYTES = (DH_PRIME.bitLength() + 7) / 8;
     private static final int PRIVATE_KEY_BYTES = 32;
     private static final int NONCE_BYTES = 16;
@@ -209,16 +210,16 @@ final class ProvisioningSecurity {
     private static BigInteger randomPrivateKey() {
         while (true) {
             BigInteger candidate = new BigInteger(1, randomBytes(PRIVATE_KEY_BYTES));
-            if (candidate.compareTo(BigInteger.TWO) >= 0
-                    && candidate.compareTo(DH_PRIME.subtract(BigInteger.TWO)) <= 0) {
+            if (candidate.compareTo(BIGINT_TWO) >= 0
+                    && candidate.compareTo(DH_PRIME.subtract(BIGINT_TWO)) <= 0) {
                 return candidate;
             }
         }
     }
 
     private static void validatePeerPublicKey(BigInteger value) throws GeneralSecurityException {
-        if (value.compareTo(BigInteger.TWO) < 0
-                || value.compareTo(DH_PRIME.subtract(BigInteger.TWO)) > 0) {
+        if (value.compareTo(BIGINT_TWO) < 0
+                || value.compareTo(DH_PRIME.subtract(BIGINT_TWO)) > 0) {
             throw new GeneralSecurityException("Peer public key is outside the allowed range");
         }
     }

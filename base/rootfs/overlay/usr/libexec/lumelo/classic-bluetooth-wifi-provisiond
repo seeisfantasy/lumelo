@@ -51,6 +51,10 @@ MAC_LABEL = b"lumelo-bt-mac-v1"
 WPA_PSK_BYTES = 32
 
 
+class ProvisioningStartupError(RuntimeError):
+    pass
+
+
 def encode_base64(value):
     return base64.b64encode(value).decode("ascii")
 
@@ -467,6 +471,9 @@ def build_status_payload(
     error_code="",
     apply_output="",
     diagnostic="",
+    bluetooth_address="",
+    rfcomm_channel="",
+    sdp_record_handles=None,
 ):
     wifi_ip = current_ip_for_interface(wifi_interface) if wifi_interface else ""
     wired_ip = current_wired_ip()
@@ -478,7 +485,7 @@ def build_status_payload(
         "wifi_ip": wifi_ip,
         "wired_ip": wired_ip,
         "all_ips": current_all_ips(),
-        "web_url": f"http://{ip}:18080/" if ip else "",
+        "web_url": f"http://{ip}/" if ip else "",
         "hostname": socket.gethostname(),
         "wifi_interface": wifi_interface,
         "wpa_unit": wpa_unit_name(wifi_interface),
@@ -489,6 +496,10 @@ def build_status_payload(
         "apply_output": apply_output,
         "ip_wait_seconds": ip_wait_seconds(),
         "diagnostic_hint": diagnostic or diagnostic_hint(wifi_interface),
+        "bluetooth_alias": PROVISIONING_ALIAS,
+        "bluetooth_address": bluetooth_address or controller_address(),
+        "rfcomm_channel": rfcomm_channel or RFCOMM_CHANNEL,
+        "sdp_record_handles": sdp_record_handles or [],
     }
 
 
@@ -511,6 +522,9 @@ def write_bootstrap_status(
     error="",
     error_code="",
     apply_output="",
+    bluetooth_address="",
+    rfcomm_channel="",
+    sdp_record_handles=None,
 ):
     try:
         write_status_file(
@@ -523,6 +537,9 @@ def write_bootstrap_status(
                 error=error,
                 error_code=error_code,
                 apply_output=apply_output,
+                bluetooth_address=bluetooth_address,
+                rfcomm_channel=rfcomm_channel,
+                sdp_record_handles=sdp_record_handles,
             )
         )
     except Exception as exc:
@@ -531,9 +548,24 @@ def write_bootstrap_status(
 
 def configure_classic_adapter():
     if which("hciconfig"):
-        subprocess.run(["hciconfig", "hci0", "up"], check=False)
-        subprocess.run(["hciconfig", "hci0", "name", PROVISIONING_ALIAS], check=False)
-        subprocess.run(["hciconfig", "hci0", "piscan"], check=False)
+        for command in (
+            ["hciconfig", "hci0", "up"],
+            ["hciconfig", "hci0", "name", PROVISIONING_ALIAS],
+            ["hciconfig", "hci0", "piscan"],
+        ):
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                detail = normalize_summary(result.stderr or result.stdout or "")
+                raise RuntimeError(
+                    f"{' '.join(command)} failed"
+                    + (f": {detail}" if detail else f" (exit {result.returncode})")
+                )
 
     if which("bluetoothctl"):
         bluetoothctl_script = "\n".join(
@@ -547,7 +579,7 @@ def configure_classic_adapter():
                 "quit",
             ]
         )
-        subprocess.run(
+        result = subprocess.run(
             ["bluetoothctl"],
             input=bluetoothctl_script,
             text=True,
@@ -555,6 +587,22 @@ def configure_classic_adapter():
             check=False,
             timeout=10,
         )
+        if result.returncode != 0:
+            detail = normalize_summary(result.stderr or result.stdout or "")
+            raise RuntimeError(
+                "bluetoothctl provisioning mode setup failed"
+                + (f": {detail}" if detail else f" (exit {result.returncode})")
+            )
+        output = "\n".join([result.stdout or "", result.stderr or ""]).lower()
+        required_markers = ("powered: yes", "discoverable: yes", "pairable: yes")
+        missing_markers = [marker for marker in required_markers if marker not in output]
+        if missing_markers:
+            raise RuntimeError(
+                "bluetoothctl did not confirm adapter state: missing "
+                + ", ".join(missing_markers)
+            )
+    else:
+        raise RuntimeError("bluetoothctl is unavailable")
 
 
 def controller_address():
@@ -575,16 +623,101 @@ def controller_address():
     return match.group(1)
 
 
+def browse_local_spp_record_handles():
+    if not which("sdptool"):
+        raise RuntimeError("sdptool is unavailable")
+
+    result = subprocess.run(
+        ["sdptool", "browse", "local"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        detail = normalize_summary(result.stderr or result.stdout or "")
+        raise RuntimeError(
+            "sdptool browse local failed"
+            + (f": {detail}" if detail else f" (exit {result.returncode})")
+        )
+
+    record_handles = []
+    current_handle = None
+    current_lines = []
+
+    def maybe_collect():
+        if not current_handle:
+            return
+        block = "\n".join(current_lines).lower()
+        if (
+            "serial port" in block
+            and '"rfcomm"' in block
+            and f"channel: {RFCOMM_CHANNEL}" in block
+        ):
+            record_handles.append(current_handle)
+
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"Service RecHandle:\s*(0x[0-9A-Fa-f]+)", line)
+        if match:
+            maybe_collect()
+            current_handle = match.group(1)
+            current_lines = [line]
+            continue
+        if current_handle:
+            current_lines.append(line)
+
+    maybe_collect()
+    return record_handles
+
+
+def remove_sdp_record(record_handle):
+    result = subprocess.run(
+        ["sdptool", "del", record_handle],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        detail = normalize_summary(result.stderr or result.stdout or "")
+        raise RuntimeError(
+            f"sdptool del {record_handle} failed"
+            + (f": {detail}" if detail else f" (exit {result.returncode})")
+        )
+
+
+def cleanup_stale_spp_records():
+    stale_handles = browse_local_spp_record_handles()
+    for record_handle in stale_handles:
+        remove_sdp_record(record_handle)
+    return stale_handles
+
+
 def register_spp_service():
     if not which("sdptool"):
         raise RuntimeError("sdptool is unavailable")
-    subprocess.run(
+    stale_handles = cleanup_stale_spp_records()
+    result = subprocess.run(
         ["sdptool", "add", f"--channel={RFCOMM_CHANNEL}", "SP"],
         check=False,
         capture_output=True,
         text=True,
         timeout=10,
     )
+    if result.returncode != 0:
+        detail = normalize_summary(result.stderr or result.stdout or "")
+        raise RuntimeError(
+            "sdptool add SP failed"
+            + (f": {detail}" if detail else f" (exit {result.returncode})")
+        )
+    current_handles = browse_local_spp_record_handles()
+    if not current_handles:
+        raise RuntimeError(
+            f"sdptool add SP succeeded but no local SPP record was found on channel {RFCOMM_CHANNEL}"
+        )
+    new_handles = [handle for handle in current_handles if handle not in stale_handles]
+    return new_handles or current_handles
 
 
 class ClientConnection:
@@ -630,10 +763,14 @@ class StatusHub:
         self.lock = threading.Lock()
         self.listeners = set()
         self.pending_wait_token = 0
+        self.bluetooth_address = controller_address()
+        self.sdp_record_handles = []
         self.state = build_status_payload(
             "idle",
             "waiting for credentials",
             wifi_interface=detect_wireless_interface(),
+            bluetooth_address=self.bluetooth_address,
+            sdp_record_handles=self.sdp_record_handles,
         )
         write_status_file(self.state)
 
@@ -680,6 +817,8 @@ class StatusHub:
         error_code="",
         apply_output="",
         diagnostic="",
+        bluetooth_address="",
+        sdp_record_handles=None,
     ):
         with self.lock:
             if not ssid:
@@ -690,6 +829,10 @@ class StatusHub:
                 apply_output = self.state.get("apply_output", "")
             if not diagnostic:
                 diagnostic = diagnostic_hint(wifi_interface)
+            if bluetooth_address:
+                self.bluetooth_address = bluetooth_address
+            if sdp_record_handles is not None:
+                self.sdp_record_handles = list(sdp_record_handles)
             self.state = build_status_payload(
                 state,
                 message,
@@ -700,6 +843,8 @@ class StatusHub:
                 error_code=error_code,
                 apply_output=apply_output,
                 diagnostic=diagnostic,
+                bluetooth_address=self.bluetooth_address,
+                sdp_record_handles=self.sdp_record_handles,
             )
             snapshot = dict(self.state)
         write_status_file(snapshot)
@@ -779,7 +924,7 @@ class ProvisioningServer:
             "all_ips": current_all_ips(),
             "wifi_interface": wifi_interface,
             "status_path": provisioning_status_path(),
-            "web_port": 18080,
+            "web_port": 80,
             "transport": "classic_bluetooth",
         }
 
@@ -884,12 +1029,43 @@ def run_server():
             error_code="missing_bluetooth_socket_support",
         )
         print(message, file=sys.stderr)
-        return 1
+        raise ProvisioningStartupError(message)
 
-    configure_classic_adapter()
-    register_spp_service()
+    try:
+        configure_classic_adapter()
+    except Exception as exc:
+        message = f"classic bluetooth adapter setup failed: {exc}"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=detect_wireless_interface(),
+            error="classic_bluetooth_adapter_setup_failed",
+            error_code="classic_bluetooth_adapter_setup_failed",
+        )
+        raise ProvisioningStartupError(message) from exc
+
+    try:
+        registered_spp_handles = register_spp_service()
+    except Exception as exc:
+        message = f"classic bluetooth SDP registration failed: {exc}"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=detect_wireless_interface(),
+            error="classic_bluetooth_sdp_registration_failed",
+            error_code="classic_bluetooth_sdp_registration_failed",
+            bluetooth_address=controller_address(),
+            rfcomm_channel=RFCOMM_CHANNEL,
+        )
+        raise ProvisioningStartupError(message) from exc
 
     server = ProvisioningServer()
+    server.status.set_state(
+        server.status.snapshot().get("state", "idle"),
+        server.status.snapshot().get("message", "waiting for credentials"),
+        bluetooth_address=controller_address(),
+        sdp_record_handles=registered_spp_handles,
+    )
     current_connection = current_connection_snapshot()
     if current_connection:
         ssid = current_connection.get("ssid", "")
@@ -906,6 +1082,7 @@ def run_server():
             ssid=ssid,
             wifi_interface=wifi_interface,
             diagnostic="Open /provisioning, /healthz, and /logs from the phone browser",
+            sdp_record_handles=registered_spp_handles,
         )
     else:
         server.status.set_state(
@@ -913,25 +1090,82 @@ def run_server():
             "ready for classic bluetooth provisioning",
             wifi_interface=detect_wireless_interface(),
             diagnostic="Use the Android app to scan for Lumelo T4 over classic bluetooth",
+            sdp_record_handles=registered_spp_handles,
         )
 
-    listen_socket = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-    listen_socket.bind((bind_address(), RFCOMM_CHANNEL))
-    listen_socket.listen(1)
-    print(
-        f"Lumelo classic bluetooth provisioning listening on channel {RFCOMM_CHANNEL} "
-        f"as {PROVISIONING_ALIAS}",
-        flush=True,
-    )
+    try:
+        listen_socket = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+    except Exception as exc:
+        message = f"classic bluetooth socket creation failed: {exc}"
+        write_bootstrap_status(
+            "failed",
+            message,
+            wifi_interface=detect_wireless_interface(),
+            error="classic_bluetooth_socket_create_failed",
+            error_code="classic_bluetooth_socket_create_failed",
+            bluetooth_address=controller_address(),
+            rfcomm_channel=RFCOMM_CHANNEL,
+            sdp_record_handles=registered_spp_handles,
+        )
+        raise ProvisioningStartupError(message) from exc
+    try:
+        try:
+            listen_socket.bind((bind_address(), RFCOMM_CHANNEL))
+        except Exception as exc:
+            message = f"classic bluetooth socket bind failed: {exc}"
+            write_bootstrap_status(
+                "failed",
+                message,
+                wifi_interface=detect_wireless_interface(),
+                error="classic_bluetooth_socket_bind_failed",
+                error_code="classic_bluetooth_socket_bind_failed",
+                bluetooth_address=controller_address(),
+                rfcomm_channel=RFCOMM_CHANNEL,
+                sdp_record_handles=registered_spp_handles,
+            )
+            raise ProvisioningStartupError(message) from exc
+        try:
+            listen_socket.listen(1)
+        except Exception as exc:
+            message = f"classic bluetooth socket listen failed: {exc}"
+            write_bootstrap_status(
+                "failed",
+                message,
+                wifi_interface=detect_wireless_interface(),
+                error="classic_bluetooth_socket_listen_failed",
+                error_code="classic_bluetooth_socket_listen_failed",
+                bluetooth_address=controller_address(),
+                rfcomm_channel=RFCOMM_CHANNEL,
+                sdp_record_handles=registered_spp_handles,
+            )
+            raise ProvisioningStartupError(message) from exc
+        print(
+            f"Lumelo classic bluetooth provisioning listening on channel {RFCOMM_CHANNEL} "
+            f"as {PROVISIONING_ALIAS}",
+            flush=True,
+        )
 
-    while True:
-        client_socket, remote_info = listen_socket.accept()
-        connection = ClientConnection(client_socket, remote_info, server.status)
-        threading.Thread(
-            target=serve_client,
-            args=(connection, server),
-            daemon=True,
-        ).start()
+        while True:
+            client_socket, remote_info = listen_socket.accept()
+            connection = ClientConnection(client_socket, remote_info, server.status)
+            threading.Thread(
+                target=serve_client,
+                args=(connection, server),
+                daemon=True,
+            ).start()
+    finally:
+        try:
+            listen_socket.close()
+        except Exception:
+            pass
+        for record_handle in registered_spp_handles:
+            try:
+                remove_sdp_record(record_handle)
+            except Exception as exc:
+                print(
+                    f"failed to remove local SPP record {record_handle}: {exc}",
+                    file=sys.stderr,
+                )
 
 
 def serve_client(connection, server):
@@ -1037,9 +1271,34 @@ def serve_client(connection, server):
         connection.close()
 
 
+def cleanup_sdp_records_main():
+    try:
+        removed_handles = cleanup_stale_spp_records()
+    except Exception as exc:
+        print(f"classic bluetooth SDP cleanup failed: {exc}", file=sys.stderr)
+        return 1
+
+    if removed_handles:
+        print(
+            "removed local SPP SDP records: " + ", ".join(removed_handles),
+            flush=True,
+        )
+    else:
+        print("no local SPP SDP records required cleanup", flush=True)
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--cleanup-sdp":
+            return cleanup_sdp_records_main()
+        print(f"unknown argument: {sys.argv[1]}", file=sys.stderr)
+        return 2
     try:
         return run_server()
+    except ProvisioningStartupError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

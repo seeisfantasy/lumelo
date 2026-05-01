@@ -19,8 +19,6 @@ unblock_bluetooth_rfkill() {
     printf '1\n' > /sys/class/rfkill/rfkill0/state || true
   fi
 
-  rm -f /dev/rfkill || true
-
   for type_path in /sys/class/rfkill/rfkill*/type; do
     [ -f "${type_path}" ] || continue
     if [ "$(cat "${type_path}" 2>/dev/null)" = "bluetooth" ]; then

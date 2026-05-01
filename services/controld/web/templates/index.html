@@ -1,283 +1,562 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Lumelo controld</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    <title>Lumelo 首页</title>
+    {{if .InlineCSS}}<style>{{.InlineCSS}}</style>{{else}}<link rel="stylesheet" href="/static/css/app.css">{{end}}
   </head>
-  <body>
-    <main class="shell">
+  <body class="app-body page-home">
+    <main class="shell shell-dashboard">
       <nav class="topnav">
-        <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">Home</a>
-        <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">Library</a>
-        <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">Provisioning</a>
-        <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">Logs</a>
+        <div class="topnav-brand">
+          <p class="eyebrow">Lumelo</p>
+          <p class="topnav-title">Lumelo</p>
+          <p class="topnav-copy">
+            先看正在播放、播放历史和专辑，再把配网与诊断留到次级入口。
+          </p>
+        </div>
+        <div class="topnav-links">
+          <a href="/" class="topnav-link {{if eq .CurrentPage "home"}}topnav-link-current{{end}}">首页</a>
+          <a href="/library" class="topnav-link {{if eq .CurrentPage "library"}}topnav-link-current{{end}}">曲库</a>
+          <a href="/provisioning" class="topnav-link {{if eq .CurrentPage "provisioning"}}topnav-link-current{{end}}">设置</a>
+          <a href="/logs" class="topnav-link {{if eq .CurrentPage "logs"}}topnav-link-current{{end}}">日志</a>
+        </div>
       </nav>
 
-      <section class="card">
-        <p class="eyebrow">Lumelo V1</p>
-        <h1>Lumelo controld is online</h1>
-        <p class="summary">
-          This page exists to prove the initial Go module, embedded SSR assets,
-          and service boundary layout are wired together.
-        </p>
-        <p class="summary" id="playback-live-status">
-          Live sync listens only for necessary playback events. It does not use
-          high-frequency polling.
-        </p>
-      </section>
-
-      <section class="card">
-        <h2>Current defaults</h2>
-        <dl class="grid">
+      <section class="card page-main home-shortcuts-card">
+        <div class="section-header">
           <div>
-            <dt>Mode</dt>
-            <dd>{{.Mode}}</dd>
+            <p class="eyebrow">快捷入口</p>
+            <h2>常用页面</h2>
           </div>
-          <div>
-            <dt>Interface</dt>
-            <dd>{{.InterfaceMode}}</dd>
-          </div>
-          <div>
-            <dt>DSD policy</dt>
-            <dd>{{.DSDPolicy}}</dd>
-          </div>
-          <div>
-            <dt>Admin password set</dt>
-            <dd>{{.PasswordConfigured}}</dd>
-          </div>
-          <div>
-            <dt>SSH enabled</dt>
-            <dd>{{.SSHEnabled}}</dd>
-          </div>
-          <div>
-            <dt>Config path</dt>
-            <dd>{{.ConfigPath}}</dd>
-          </div>
-          <div>
-            <dt>Playback cmd socket</dt>
-            <dd>{{.CommandSocket}}</dd>
-          </div>
-          <div>
-            <dt>Playback event socket</dt>
-            <dd>{{.EventSocket}}</dd>
-          </div>
-          <div>
-            <dt>Library database</dt>
-            <dd>{{.LibraryDBPath}}</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section class="card">
-        <h2>Provisioning Summary</h2>
-        {{if .Provisioning.Available}}
-          <p class="status-line">
-            State:
-            {{if eq .Provisioning.State "connected"}}
-              <span class="pill pill-ok">connected</span>
-            {{else if eq .Provisioning.State "failed"}}
-              <span class="pill pill-offline">failed</span>
-            {{else}}
-              <span class="pill pill-current">{{if .Provisioning.State}}{{.Provisioning.State}}{{else}}unknown{{end}}</span>
-            {{end}}
+          <p class="summary section-summary">
+            把曲库、设置和日志固定放在首页上方，不让关键入口只依赖顶部导航。
           </p>
-        {{else}}
-          <p class="status-line">
-            State:
-            <span class="pill pill-offline">unavailable</span>
-          </p>
-        {{end}}
-
-        <dl class="grid">
-          <div>
-            <dt>Message</dt>
-            <dd>{{if .Provisioning.Message}}{{.Provisioning.Message}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>SSID</dt>
-            <dd>{{if .Provisioning.SSID}}{{.Provisioning.SSID}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>IP</dt>
-            <dd>{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Wi-Fi IP</dt>
-            <dd>{{if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Wired IP</dt>
-            <dd>{{if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>All IPs</dt>
-            <dd>{{if .Provisioning.AllIPs}}{{range $index, $ip := .Provisioning.AllIPs}}{{if $index}}, {{end}}{{$ip}}{{end}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Wi-Fi interface</dt>
-            <dd>{{if .Provisioning.WiFiInterface}}{{.Provisioning.WiFiInterface}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Error code</dt>
-            <dd>{{if .Provisioning.ErrorCode}}{{.Provisioning.ErrorCode}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Updated at</dt>
-            <dd>{{if .Provisioning.UpdatedAt}}{{.Provisioning.UpdatedAt}}{{else}}-{{end}}</dd>
-          </div>
-        </dl>
-
-        {{if .Provisioning.ApplyOutput}}
-          <p class="summary">Apply output: {{.Provisioning.ApplyOutput}}</p>
-        {{end}}
-        {{if .Provisioning.DiagnosticHint}}
-          <p class="summary">Diagnostic hint: {{.Provisioning.DiagnosticHint}}</p>
-        {{end}}
-        {{if .Provisioning.ReadError}}
-          <p class="banner banner-error">Provisioning status read error: {{.Provisioning.ReadError}}</p>
-        {{end}}
-
-        <div class="actions log-actions">
-          <a href="/provisioning" class="button-link">Open Provisioning</a>
-          <a href="/provisioning-status" class="button-link button-link-secondary">Open JSON</a>
-          <a href="/healthz" class="button-link button-link-secondary">Healthz</a>
-          <a href="/logs?lines=300" class="button-link button-link-secondary">Logs</a>
+        </div>
+        <div class="home-shortcuts-grid">
+          <a href="/library" class="home-shortcut-tile">
+            <span class="home-shortcut-label">曲库</span>
+            <strong class="home-shortcut-title">曲库</strong>
+            <span class="home-shortcut-meta">专辑、歌曲和当前队列</span>
+          </a>
+          <a href="/provisioning" class="home-shortcut-tile">
+            <span class="home-shortcut-label">设置</span>
+            <strong class="home-shortcut-title">设置</strong>
+            <span class="home-shortcut-meta">查看联网状态和设备入口</span>
+          </a>
+          <a href="/logs?lines=300" class="home-shortcut-tile">
+            <span class="home-shortcut-label">日志</span>
+            <strong class="home-shortcut-title">日志</strong>
+            <span class="home-shortcut-meta">复制最近启动周期输出</span>
+          </a>
         </div>
       </section>
 
-      <section class="card">
-        <h2>Playbackd Status</h2>
-        {{if .CommandMessage}}
-          <p class="banner banner-ok">{{.CommandMessage}}</p>
-        {{end}}
-        {{if .CommandError}}
-          <p class="banner banner-error">{{.CommandError}}</p>
-        {{end}}
-
-        <p class="status-line">
-          Socket:
-          {{if .PlaybackStatus.Available}}
-            <span class="pill pill-ok">online</span>
-          {{else}}
-            <span class="pill pill-offline">offline</span>
-          {{end}}
-        </p>
-        {{if .PlaybackStatus.Error}}
-          <p class="summary">Last IPC error: {{.PlaybackStatus.Error}}</p>
-        {{end}}
-
-        <dl class="grid">
-          <div>
-            <dt>State</dt>
-            <dd>{{if .PlaybackStatus.State}}{{.PlaybackStatus.State}}{{else}}unknown{{end}}</dd>
+      <section class="card page-hero page-main home-player-stage">
+        <div class="home-player-stage-copy">
+          <p class="eyebrow">首页</p>
+          <h1>先听音乐，再看状态</h1>
+          <p class="summary">
+            这页优先服务播放：封面、当前曲目、传输控制、播放历史和专辑入口都放在第一视觉层。
+          </p>
+          <p class="summary" id="playback-live-status">
+            页面保留 SSR first paint，并继续消费稳定的 <code>/api/v1/...</code> contract 做轻量刷新。
+          </p>
+          <div class="home-stage-pills">
+            <span class="focus-chip">
+              <span class="focus-chip-label">状态</span>
+              <span id="home-overview-state">{{playbackStateLabel .PlaybackStatus.State}}</span>
+            </span>
+            <span class="focus-chip">
+              <span class="focus-chip-label">队列</span>
+              <span id="home-overview-queue">{{.PlaybackStatus.QueueEntries}}</span>
+            </span>
+            <span class="focus-chip">
+              <span class="focus-chip-label">网络</span>
+              <span id="home-overview-network">{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}离线{{end}}</span>
+            </span>
           </div>
-          <div>
-            <dt>Order mode</dt>
-            <dd>{{if .PlaybackStatus.OrderMode}}{{.PlaybackStatus.OrderMode}}{{else}}-{{end}}</dd>
+          <p class="home-stage-note" id="home-overview-network-meta">{{provisioningStateLabel .Provisioning.State .Provisioning.Available}}</p>
+          <div class="actions hero-actions">
+            <a href="/library" class="button-link">打开曲库</a>
+            <a href="/provisioning" class="button-link button-link-secondary">打开设置</a>
+            <a href="/logs?lines=300" class="button-link button-link-secondary">查看日志</a>
           </div>
-          <div>
-            <dt>Repeat mode</dt>
-            <dd>{{if .PlaybackStatus.RepeatMode}}{{.PlaybackStatus.RepeatMode}}{{else}}-{{end}}</dd>
+        </div>
+        <div class="home-player-stage-art">
+          <div class="home-art-shell">
+            <div class="home-art-vinyl"></div>
+            {{if .NowPlaying.CoverThumbPath}}
+              <img
+                id="home-hero-artwork-image"
+                class="home-artwork"
+                src="{{.NowPlaying.CoverThumbPath}}"
+                alt="{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else}}当前封面{{end}}"
+              >
+              <div id="home-hero-artwork-placeholder" class="home-artwork home-artwork-placeholder" hidden>
+                <span>Lumelo</span>
+              </div>
+            {{else}}
+              <img id="home-hero-artwork-image" class="home-artwork" src="" alt="" hidden>
+              <div id="home-hero-artwork-placeholder" class="home-artwork home-artwork-placeholder">
+                <span>Lumelo</span>
+              </div>
+            {{end}}
           </div>
-          <div>
-            <dt>Current track</dt>
-            <dd>{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}-{{end}}</dd>
+          <p class="home-art-caption" id="home-hero-caption">
+            {{if .NowPlaying.AlbumTitle}}{{.NowPlaying.AlbumTitle}}{{else}}本地模式 · 曲库已就绪{{end}}
+          </p>
+          <div class="home-hero-player-card">
+            <p class="home-hero-album-line" id="home-hero-album-line">{{if .NowPlaying.AlbumTitle}}{{.NowPlaying.AlbumTitle}}{{else}}本地模式 · 曲库已就绪{{end}}</p>
+            <p class="playback-hero-title home-hero-track-title" id="home-hero-track-title">{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}还没有加入歌曲{{end}}</p>
+            <p class="playback-hero-meta home-hero-track-subtitle" id="home-hero-track-subtitle">
+              {{if .NowPlaying.Artist}}{{.NowPlaying.Artist}}{{else if .NowPlaying.RelativePath}}{{.NowPlaying.RelativePath}}{{else}}从曲库挑一张专辑开始播放{{end}}
+            </p>
+            <p class="home-hero-player-meta">
+              <span id="home-hero-state">{{playbackStateLabel .PlaybackStatus.State}}</span>
+              <span id="home-hero-modes">{{orderModeLabel .PlaybackStatus.OrderMode}} · {{repeatModeLabel .PlaybackStatus.RepeatMode}}</span>
+              <span id="home-hero-queue-count">{{.PlaybackStatus.QueueEntries}} 首待播</span>
+            </p>
+            <form method="post" action="/commands" class="actions home-hero-transport">
+              <input type="hidden" name="track_id" value="{{.SuggestedTrackID}}" data-transport-track-id>
+              <button type="submit" name="action" value="prev">上一首</button>
+              <button type="submit" name="action" value="{{transportPrimaryAction .PlaybackStatus.State}}" data-transport-primary>{{transportPrimaryLabel .PlaybackStatus.State}}</button>
+              <button type="submit" name="action" value="next">下一首</button>
+              <button type="submit" name="action" value="stop">停止</button>
+            </form>
+            <p class="banner banner-ok home-hero-banner" id="home-command-message" {{if not .CommandMessage}}hidden{{end}}>
+              <span id="home-command-message-value">{{.CommandMessage}}</span>
+            </p>
+            <p class="banner banner-error home-hero-banner" id="home-command-error" {{if not .CommandError}}hidden{{end}}>
+              <span id="home-command-error-value">{{.CommandError}}</span>
+            </p>
+            <p class="summary home-hero-error" id="playback-error" {{if not .PlaybackStatus.Error}}hidden{{end}}>
+              最近一次 IPC 错误：<span id="playback-error-value">{{.PlaybackStatus.Error}}</span>
+            </p>
           </div>
-          <div>
-            <dt>Last command</dt>
-            <dd>{{if .PlaybackStatus.LastCommand}}{{.PlaybackStatus.LastCommand}}{{else}}-{{end}}</dd>
-          </div>
-          <div>
-            <dt>Queue entries</dt>
-            <dd>{{.PlaybackStatus.QueueEntries}}</dd>
-          </div>
-        </dl>
+        </div>
       </section>
 
-      <section class="card">
-        <h2>Playback Controls</h2>
-        <form method="post" action="/commands" class="stack">
-          <label class="label" for="track-id">Track id</label>
-          <input id="track-id" name="track_id" value="{{.SuggestedTrackID}}" class="input">
-          <div class="actions">
-            <button type="submit" name="action" value="play">Play</button>
-            <button type="submit" name="action" value="play_history">Play History</button>
+      <section class="card page-main home-now-playing-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">当前播放</p>
+            <h2>播放详情</h2>
           </div>
-        </form>
+          <p class="summary section-summary">
+            首页保留播放器核心操作，不把调试字段堆成 dashboard。
+          </p>
+        </div>
+        <div class="home-now-playing-grid">
+          <div class="home-now-playing-copy">
+            <p class="playback-hero-label">当前曲目</p>
+            <p class="playback-hero-title" id="playback-current-track-hero">{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}还没有加入歌曲{{end}}</p>
+            <p class="playback-hero-meta" id="home-now-playing-subtitle">
+              {{if .NowPlaying.Artist}}{{.NowPlaying.Artist}}{{else if .NowPlaying.RelativePath}}{{.NowPlaying.RelativePath}}{{else}}从曲库挑一张专辑开始播放{{end}}
+            </p>
+            <p class="home-now-playing-path" id="home-overview-track">{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}还没有加入歌曲{{end}}</p>
+            <p class="home-player-status-line">
+              <span id="playback-engine-summary">
+                {{playbackStateLabel .PlaybackStatus.State}}
+                ·
+                {{orderModeLabel .PlaybackStatus.OrderMode}}
+                ·
+                {{repeatModeLabel .PlaybackStatus.RepeatMode}}
+              </span>
+              <span
+                id="playback-socket-pill"
+                class="pill {{if .PlaybackStatus.Available}}pill-ok{{else}}pill-offline{{end}}"
+              >
+                {{if .PlaybackStatus.Available}}在线{{else}}离线{{end}}
+              </span>
+            </p>
+          </div>
 
-        <form method="post" action="/commands" class="actions">
-          <button type="submit" name="action" value="pause">Pause</button>
-          <button type="submit" name="action" value="prev">Prev</button>
-          <button type="submit" name="action" value="next">Next</button>
-          <button type="submit" name="action" value="stop">Stop</button>
-          <button type="submit" name="action" value="status">Refresh Status</button>
-          <button type="submit" name="action" value="ping">Ping Socket</button>
-        </form>
+          <div class="home-now-playing-actions">
+            <form method="post" action="/commands" class="actions control-action-grid">
+              <input type="hidden" name="track_id" value="{{.SuggestedTrackID}}" data-transport-track-id>
+              <button type="submit" name="action" value="prev">上一首</button>
+              <button type="submit" name="action" value="{{transportPrimaryAction .PlaybackStatus.State}}" data-transport-primary>{{transportPrimaryLabel .PlaybackStatus.State}}</button>
+              <button type="submit" name="action" value="next">下一首</button>
+              <button type="submit" name="action" value="stop">停止</button>
+              <button type="submit" name="action" value="status">刷新状态</button>
+              <button type="submit" name="action" value="ping">检测连接</button>
+            </form>
+
+            <div class="home-transport-metrics">
+              <article class="home-metric">
+                <p class="overview-label">播放状态</p>
+                <p class="overview-value" id="playback-state">{{playbackStateLabel .PlaybackStatus.State}}</p>
+              </article>
+              <article class="home-metric">
+                <p class="overview-label">播放顺序</p>
+                <p class="overview-value" id="playback-order-mode">{{orderModeLabel .PlaybackStatus.OrderMode}}</p>
+              </article>
+              <article class="home-metric">
+                <p class="overview-label">循环方式</p>
+                <p class="overview-value" id="playback-repeat-mode">{{repeatModeLabel .PlaybackStatus.RepeatMode}}</p>
+              </article>
+              <article class="home-metric">
+                <p class="overview-label">上次命令</p>
+                <p class="overview-value" id="playback-last-command">{{if .PlaybackStatus.LastCommand}}{{.PlaybackStatus.LastCommand}}{{else}}-{{end}}</p>
+              </article>
+            </div>
+          </div>
+        </div>
+
+        <div class="home-direct-play">
+          <form method="post" action="/commands" class="stack">
+            <label class="label" for="track-id">按 Track ID 精确播放</label>
+            <input id="track-id" name="track_id" value="{{.SuggestedTrackID}}" class="input">
+            <div class="actions">
+              <button type="submit" name="action" value="play">播放</button>
+              <button type="submit" name="action" value="play_history">播放历史轨道</button>
+            </div>
+          </form>
+        </div>
       </section>
 
-      <section class="card">
-        <h2>Queue</h2>
-        {{if .QueueSnapshot.Error}}
-          <p class="summary">Last queue snapshot error: {{.QueueSnapshot.Error}}</p>
-        {{end}}
-
-        <dl class="grid">
+      <section class="card page-main home-queue-card">
+        <div class="section-header">
           <div>
-            <dt>Snapshot socket</dt>
-            <dd>
-              {{if .QueueSnapshot.Available}}
-                <span class="pill pill-ok">online</span>
-              {{else}}
-                <span class="pill pill-offline">offline</span>
-              {{end}}
+            <p class="eyebrow">播放记录</p>
+            <h2>播放历史</h2>
+          </div>
+          <p class="summary section-summary">
+            这里只显示已经播放过的曲目和当前曲目，不提前暴露随机或后续队列。
+          </p>
+        </div>
+
+        <div class="queue-overview home-queue-overview">
+          <div class="queue-overview-chip">
+            <span class="queue-overview-label">顺序</span>
+            <span class="queue-overview-value" id="queue-overview-order">{{orderModeLabel .QueueSnapshot.OrderMode}}</span>
+          </div>
+          <div class="queue-overview-chip">
+            <span class="queue-overview-label">循环</span>
+            <span class="queue-overview-value" id="queue-overview-repeat">{{repeatModeLabel .QueueSnapshot.RepeatMode}}</span>
+          </div>
+          <div class="queue-overview-chip">
+            <span class="queue-overview-label">当前位置</span>
+            <span class="queue-overview-value" id="queue-overview-index">{{.CurrentOrderLabel}}</span>
+          </div>
+          <div class="queue-overview-chip">
+            <span class="queue-overview-label">歌曲数</span>
+            <span class="queue-overview-value" id="queue-overview-count">{{len .HistoryEntries}}</span>
+          </div>
+        </div>
+
+        <dl class="grid home-queue-meta">
+          <div>
+            <dt>队列连接</dt>
+            <dd id="queue-snapshot-socket">
+              <span id="queue-socket-pill" class="pill {{if .QueueSnapshot.Available}}pill-ok{{else}}pill-offline{{end}}">
+                {{if .QueueSnapshot.Available}}在线{{else}}离线{{end}}
+              </span>
             </dd>
           </div>
           <div>
-            <dt>Current order index</dt>
-            <dd>{{.CurrentOrderLabel}}</dd>
+            <dt>当前序号</dt>
+            <dd id="queue-current-order-index">{{.CurrentOrderLabel}}</dd>
+          </div>
+          <div>
+            <dt>当前曲目</dt>
+            <dd id="playback-queue-entries">{{.PlaybackStatus.QueueEntries}}</dd>
+          </div>
+          <div>
+            <dt>当前 track</dt>
+            <dd id="playback-current-track">{{if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}-{{end}}</dd>
           </div>
         </dl>
 
         <form method="post" action="/commands" class="stack queue-tools">
-          <label class="label" for="queue-track-id">Queue track id</label>
+          <label class="label" for="queue-track-id">向队列加入指定 Track ID</label>
           <input id="queue-track-id" name="track_id" value="{{.SuggestedTrackID}}" class="input">
           <div class="actions">
-            <button type="submit" name="action" value="queue_append">Append</button>
-            <button type="submit" name="action" value="queue_insert_next">Insert Next</button>
-            <button type="submit" name="action" value="queue_snapshot">Refresh Queue</button>
-            <button type="submit" name="action" value="queue_clear">Clear Queue</button>
+            <button type="submit" name="action" value="queue_append">加入队列</button>
+            <button type="submit" name="action" value="queue_insert_next">下一首播放</button>
+            <button type="submit" name="action" value="queue_snapshot">刷新队列</button>
+            <button type="submit" name="action" value="queue_clear">清空队列</button>
           </div>
         </form>
 
-        {{if .QueueEntries}}
-          <div class="queue-list">
-            {{range .QueueEntries}}
+        <p class="summary" id="queue-error" {{if not .HistorySnapshot.Error}}hidden{{end}}>
+          播放历史读取失败：<span id="queue-error-value">{{.HistorySnapshot.Error}}</span>
+        </p>
+
+        {{if .HistoryEntries}}
+          <div class="queue-list" id="queue-list">
+            {{range .HistoryEntries}}
               <article class="queue-item {{if .IsCurrent}}queue-item-current{{end}}">
                 <div class="queue-order">{{.DisplayIndex}}</div>
                 <div class="queue-copy">
                   <p class="queue-title">
                     {{.Title}}
-                    {{if .IsCurrent}}<span class="pill pill-current">current</span>{{end}}
+                    {{if .IsCurrent}}<span class="pill pill-current">当前</span>{{end}}
                   </p>
-                  <p class="queue-meta">entry {{.QueueEntryID}} · track {{.TrackUID}}</p>
+                  <p class="queue-meta">播放记录 {{.DisplayIndex}} {{if .IsCurrent}}· 当前播放{{else}}· 已播放{{end}}</p>
                   <p class="queue-meta">{{.RelativePath}}</p>
                 </div>
-                <form method="post" action="/commands" class="queue-row-action">
-                  <input type="hidden" name="track_id" value="{{.QueueEntryID}}">
-                  <button type="submit" name="action" value="queue_remove">Remove</button>
+                <form method="post" action="/commands" class="queue-history-action">
+                  <input type="hidden" name="track_id" value="{{.TrackUID}}">
+                  <button type="submit" name="action" value="play_history">播放</button>
                 </form>
               </article>
             {{end}}
           </div>
-        {{else if .QueueSnapshot.Available}}
-          <p class="summary">Queue is empty.</p>
+          <div class="home-queue-empty-state" id="queue-empty-state" hidden>
+            <div class="home-queue-preview-row">
+              <span class="home-queue-preview-order">01</span>
+              <div class="home-queue-preview-copy">
+                <strong>开始播放后会出现第一条记录</strong>
+                <span>当前播放也会作为播放记录显示在这里。</span>
+              </div>
+            </div>
+            <div class="home-queue-preview-row">
+              <span class="home-queue-preview-order">02</span>
+              <div class="home-queue-preview-copy">
+                <strong>切到下一首后增加一行</strong>
+                <span>未来随机顺序不会提前显示。</span>
+              </div>
+            </div>
+            <p class="summary" id="queue-empty" hidden>还没有播放历史。</p>
+            <p class="summary home-empty-meta" id="queue-empty-meta">从曲库开始播放后，这里会记录已到达过的曲目。</p>
+          </div>
+        {{else if .HistorySnapshot.Available}}
+          <div class="queue-list" id="queue-list" hidden></div>
+          <div class="home-queue-empty-state" id="queue-empty-state">
+            <div class="home-queue-preview-row">
+              <span class="home-queue-preview-order">01</span>
+              <div class="home-queue-preview-copy">
+                <strong>开始播放后会出现第一条记录</strong>
+                <span>当前播放也会作为播放记录显示在这里。</span>
+              </div>
+            </div>
+            <div class="home-queue-preview-row">
+              <span class="home-queue-preview-order">02</span>
+              <div class="home-queue-preview-copy">
+                <strong>切到下一首后增加一行</strong>
+                <span>未来随机顺序不会提前显示。</span>
+              </div>
+            </div>
+            <p class="summary" id="queue-empty">还没有播放历史。</p>
+            <p class="summary home-empty-meta" id="queue-empty-meta">从曲库开始播放后，这里会记录已到达过的曲目。</p>
+          </div>
         {{else}}
-          <p class="summary">Queue snapshot is unavailable.</p>
+          <div class="queue-list" id="queue-list" hidden></div>
+          <div class="home-queue-empty-state" id="queue-empty-state">
+            <div class="home-queue-preview-row">
+              <span class="home-queue-preview-order">--</span>
+              <div class="home-queue-preview-copy">
+                <strong>播放历史暂时不可用</strong>
+                <span>等播放器连接恢复后，历史记录会回到这里。</span>
+              </div>
+            </div>
+            <p class="summary" id="queue-empty">播放历史暂时不可用。</p>
+            <p class="summary home-empty-meta" id="queue-empty-meta">当前先保留播放器主操作，等播放器连接恢复后再继续补全。</p>
+          </div>
         {{end}}
       </section>
+
+      <section class="card page-main home-featured-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">专辑</p>
+            <h2>最近专辑</h2>
+          </div>
+          <p class="summary section-summary">
+            首页只给出专辑入口，不把曲库页的完整浏览结构塞进来。
+          </p>
+        </div>
+        {{if .FeaturedAlbums}}
+          <div class="album-shelf" id="home-featured-albums">
+            {{range .FeaturedAlbums}}
+              <article class="album-shelf-card">
+                <a href="{{.BrowsePath}}" class="album-shelf-cover">
+                  {{if .CoverThumbPath}}
+                    <img src="{{.CoverThumbPath}}" alt="{{.Title}} cover" class="library-cover-art">
+                  {{else}}
+                    <span class="album-shelf-placeholder">{{.Title}}</span>
+                  {{end}}
+                </a>
+                <p class="album-shelf-title">{{.Title}}</p>
+                <p class="album-shelf-meta">{{.AlbumArtist}} · {{.YearLabel}}</p>
+                <p class="album-shelf-meta">{{.TrackCount}} 首 · {{.DurationLabel}}</p>
+                <a href="{{.BrowsePath}}" class="button-link button-link-secondary album-shelf-link">查看专辑</a>
+              </article>
+            {{end}}
+          </div>
+          <div class="home-featured-empty-state" id="home-featured-albums-empty-state" hidden>
+            <div class="home-featured-placeholder-grid" aria-hidden="true">
+              <div class="home-featured-placeholder home-featured-placeholder-sun">晚风唱片</div>
+              <div class="home-featured-placeholder home-featured-placeholder-cloud">清晨合辑</div>
+              <div class="home-featured-placeholder home-featured-placeholder-mist">夜航录音</div>
+            </div>
+            <p class="summary" id="home-featured-albums-empty" hidden>曲库里还没有可展示的专辑。</p>
+            <p class="summary home-empty-meta" id="home-featured-albums-empty-meta">完成扫描后，首页会先给出最近专辑入口。</p>
+          </div>
+        {{else}}
+          <div class="album-shelf" id="home-featured-albums" hidden></div>
+          <div class="home-featured-empty-state" id="home-featured-albums-empty-state">
+            <div class="home-featured-placeholder-grid" aria-hidden="true">
+              <div class="home-featured-placeholder home-featured-placeholder-sun">晚风唱片</div>
+              <div class="home-featured-placeholder home-featured-placeholder-cloud">清晨合辑</div>
+              <div class="home-featured-placeholder home-featured-placeholder-mist">夜航录音</div>
+            </div>
+            <p class="summary" id="home-featured-albums-empty">曲库里还没有可展示的专辑。</p>
+            <p class="summary home-empty-meta" id="home-featured-albums-empty-meta">完成扫描后，首页会先给出最近专辑入口。</p>
+          </div>
+        {{end}}
+      </section>
+
+      <section class="card page-rail home-system-card">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">本地模式</p>
+            <h2>设备摘要</h2>
+          </div>
+          <p class="summary section-summary">
+            默认配置和配网信息继续保留，但降级成右侧辅助信息。
+          </p>
+        </div>
+
+        <p class="status-line">
+          配网状态：
+          <span
+            id="provisioning-state-pill"
+            class="pill {{if not .Provisioning.Available}}pill-offline{{else if eq .Provisioning.State "connected"}}pill-ok{{else if eq .Provisioning.State "failed"}}pill-offline{{else}}pill-current{{end}}"
+          >
+            {{provisioningStateLabel .Provisioning.State .Provisioning.Available}}
+          </span>
+        </p>
+
+        <dl class="grid grid-compact">
+          <div>
+            <dt>模式</dt>
+            <dd id="defaults-mode">{{modeLabel .Mode}}</dd>
+          </div>
+          <div>
+            <dt>网络</dt>
+            <dd id="defaults-interface">{{interfaceModeLabel .InterfaceMode}}</dd>
+          </div>
+          <div>
+            <dt>DSD 策略</dt>
+            <dd id="defaults-dsd-policy">{{.DSDPolicy}}</dd>
+          </div>
+          <div>
+            <dt>管理密码</dt>
+            <dd id="defaults-password-configured">{{boolLabel .PasswordConfigured "已设置" "未设置"}}</dd>
+          </div>
+          <div>
+            <dt>SSH</dt>
+            <dd id="defaults-ssh-enabled">{{boolLabel .SSHEnabled "已开启" "未开启"}}</dd>
+          </div>
+          <div>
+            <dt>配置文件</dt>
+            <dd id="defaults-config-path">{{.ConfigPath}}</dd>
+          </div>
+          <div>
+            <dt>SSID</dt>
+            <dd id="provisioning-ssid">{{if .Provisioning.SSID}}{{.Provisioning.SSID}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>IP</dt>
+            <dd id="provisioning-ip">{{if .Provisioning.IP}}{{.Provisioning.IP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Wi-Fi IP</dt>
+            <dd id="provisioning-wifi-ip">{{if .Provisioning.WiFiIP}}{{.Provisioning.WiFiIP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>有线 IP</dt>
+            <dd id="provisioning-wired-ip">{{if .Provisioning.WiredIP}}{{.Provisioning.WiredIP}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>Wi-Fi 接口</dt>
+            <dd id="provisioning-wifi-interface">{{if .Provisioning.WiFiInterface}}{{.Provisioning.WiFiInterface}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>错误码</dt>
+            <dd id="provisioning-error-code">{{if .Provisioning.ErrorCode}}{{.Provisioning.ErrorCode}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>蓝牙地址</dt>
+            <dd id="provisioning-bluetooth-address">{{if .Provisioning.BluetoothAddress}}{{.Provisioning.BluetoothAddress}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>RFCOMM 通道</dt>
+            <dd id="provisioning-rfcomm-channel">{{if .Provisioning.RFCOMMChannel}}{{.Provisioning.RFCOMMChannel}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>SDP 记录</dt>
+            <dd id="provisioning-sdp-record-handles">{{if .Provisioning.SDPRecordHandles}}{{range $index, $handle := .Provisioning.SDPRecordHandles}}{{if $index}}, {{end}}{{$handle}}{{end}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>更新时间</dt>
+            <dd id="provisioning-updated-at">{{if .Provisioning.UpdatedAt}}{{.Provisioning.UpdatedAt}}{{else}}-{{end}}</dd>
+          </div>
+          <div>
+            <dt>播放命令 Socket</dt>
+            <dd id="defaults-command-socket">{{.CommandSocket}}</dd>
+          </div>
+          <div>
+            <dt>播放事件 Socket</dt>
+            <dd id="defaults-event-socket">{{.EventSocket}}</dd>
+          </div>
+          <div>
+            <dt>曲库数据库</dt>
+            <dd id="defaults-library-db">{{.LibraryDBPath}}</dd>
+          </div>
+          <div>
+            <dt>说明</dt>
+            <dd id="provisioning-message">{{if .Provisioning.Message}}{{.Provisioning.Message}}{{else}}-{{end}}</dd>
+          </div>
+        </dl>
+
+        <p class="summary" id="provisioning-apply-output" {{if not .Provisioning.ApplyOutput}}hidden{{end}}>
+          应用输出：<span id="provisioning-apply-output-value">{{.Provisioning.ApplyOutput}}</span>
+        </p>
+        <p class="summary" id="provisioning-diagnostic-hint" {{if not .Provisioning.DiagnosticHint}}hidden{{end}}>
+          诊断提示：<span id="provisioning-diagnostic-hint-value">{{.Provisioning.DiagnosticHint}}</span>
+        </p>
+        <p class="summary" id="provisioning-all-ips" hidden>{{if .Provisioning.AllIPs}}{{range $index, $ip := .Provisioning.AllIPs}}{{if $index}}, {{end}}{{$ip}}{{end}}{{else}}-{{end}}</p>
+        <p class="banner banner-error" id="provisioning-read-error" {{if not .Provisioning.ReadError}}hidden{{end}}>
+          配网状态读取失败：<span id="provisioning-read-error-value">{{.Provisioning.ReadError}}</span>
+        </p>
+
+        <div class="actions log-actions">
+          <a href="{{.ProvisioningPath}}" class="button-link button-link-secondary">打开设置</a>
+          <a href="{{.ProvisioningAPIPath}}" class="button-link button-link-secondary">查看 JSON</a>
+          <a href="{{.SystemHealthPath}}" class="button-link button-link-secondary">查看健康状态</a>
+          <a href="/logs?lines=300" class="button-link button-link-secondary">查看日志</a>
+        </div>
+      </section>
     </main>
+
+    <footer class="player-dock">
+      <div class="player-dock-copy">
+        <p class="player-dock-kicker">迷你播放器</p>
+        <p class="player-dock-title" id="home-player-title">{{if .NowPlaying.Title}}{{.NowPlaying.Title}}{{else if .PlaybackStatus.CurrentTrack}}{{.PlaybackStatus.CurrentTrack}}{{else}}还没有加入歌曲{{end}}</p>
+        <p class="player-dock-meta">
+          <span id="home-player-state">{{playbackStateLabel .PlaybackStatus.State}}</span>
+          <span id="home-player-modes">
+            {{orderModeLabel .PlaybackStatus.OrderMode}}
+            ·
+            {{repeatModeLabel .PlaybackStatus.RepeatMode}}
+          </span>
+          <span id="home-player-queue-count">{{.PlaybackStatus.QueueEntries}} 首待播</span>
+        </p>
+      </div>
+      <form method="post" action="/commands" class="actions player-dock-actions">
+        <input type="hidden" name="track_id" value="{{.SuggestedTrackID}}" data-transport-track-id>
+        <button type="submit" name="action" value="prev">上一首</button>
+        <button type="submit" name="action" value="{{transportPrimaryAction .PlaybackStatus.State}}" data-transport-primary>{{transportPrimaryLabel .PlaybackStatus.State}}</button>
+        <button type="submit" name="action" value="next">下一首</button>
+        <button type="submit" name="action" value="stop">停止</button>
+      </form>
+    </footer>
+
     <script>
       (() => {
         const statusNode = document.getElementById("playback-live-status");
@@ -285,17 +564,680 @@
           return;
         }
 
-        const stream = new EventSource('{{.PlaybackStreamPath}}');
-        let reloadPending = false;
+        const endpoints = {
+          systemSummary: '{{.SystemSummaryPath}}',
+          provisioning: '{{.ProvisioningAPIPath}}',
+          playbackCommands: '{{.PlaybackCommandsPath}}',
+          playbackStatus: '{{.PlaybackStatusPath}}',
+          playbackQueue: '{{.PlaybackQueuePath}}',
+          playbackHistory: '{{.PlaybackHistoryPath}}',
+          playbackEvents: '{{.PlaybackStreamPath}}',
+          librarySnapshot: '{{.LibrarySnapshotPath}}'
+        };
+        const stream = new EventSource(endpoints.playbackEvents);
+        let refreshPending = false;
+        let latestPlaybackStatus = null;
+        let latestQueueSnapshot = null;
+        let latestLibrarySnapshot = null;
 
-        const scheduleReload = (label) => {
-          if (reloadPending) {
+        const textValue = (value, fallback = "-") => {
+          if (Array.isArray(value)) {
+            return value.length ? value.join(", ") : fallback;
+          }
+          if (value === null || value === undefined) {
+            return fallback;
+          }
+          const normalized = String(value).trim();
+          return normalized === "" ? fallback : normalized;
+        };
+
+        const rawValue = (value) => {
+          if (value === null || value === undefined) {
+            return "";
+          }
+          return String(value).trim();
+        };
+
+        const playbackStateLabel = (value) => {
+          const normalized = rawValue(value);
+          const map = {
+            quiet_active: "正在播放",
+            pre_quiet: "准备播放",
+            paused: "已暂停",
+            stopped: "已停止",
+            idle: "空闲",
+            failed: "播放失败"
+          };
+          return map[normalized] || textValue(value, "未知状态");
+        };
+
+        const playbackIsActive = (state) => state === "playing" || state === "quiet_active";
+
+        const transportIsPauseState = (state) => ["playing", "quiet_active", "pre_quiet"].includes(rawValue(state));
+        const transportPrimaryAction = (state) => transportIsPauseState(state) ? "pause" : "play";
+        const transportPrimaryLabel = (state) => transportIsPauseState(state) ? "暂停" : "播放";
+
+        const orderModeLabel = (value) => {
+          const normalized = rawValue(value);
+          const map = {
+            sequential: "顺序播放",
+            shuffle: "随机播放"
+          };
+          return map[normalized] || textValue(value, "未设置");
+        };
+
+        const repeatModeLabel = (value) => {
+          const normalized = rawValue(value);
+          const map = {
+            off: "不循环",
+            one: "单曲循环",
+            repeat_one: "单曲循环",
+            all: "列表循环",
+            repeat_all: "列表循环"
+          };
+          return map[normalized] || textValue(value, "未设置");
+        };
+
+        const interfaceModeLabel = (value) => {
+          const normalized = rawValue(value);
+          const map = {
+            wifi: "Wi-Fi",
+            ethernet: "有线网络",
+            bluetooth: "蓝牙"
+          };
+          return map[normalized] || textValue(value, "未识别");
+        };
+
+        const provisioningStateLabel = (state, available = true) => {
+          if (!available) {
+            return "不可用";
+          }
+          const normalized = rawValue(state);
+          const map = {
+            connected: "已连接",
+            failed: "失败",
+            waiting_for_ip: "等待 IP",
+            applying: "正在应用",
+            idle: "空闲",
+            ready: "已就绪"
+          };
+          return map[normalized] || textValue(state, "未知状态");
+        };
+
+        const boolLabel = (value, enabledLabel = "已开启", disabledLabel = "未开启") => (
+          value ? enabledLabel : disabledLabel
+        );
+
+        const setText = (id, value, fallback = "-") => {
+          const node = document.getElementById(id);
+          if (!node) {
             return;
           }
-          reloadPending = true;
-          statusNode.textContent = `Playback event ${label} detected. Refreshing this SSR view.`;
-          window.setTimeout(() => window.location.reload(), 140);
+          node.textContent = textValue(value, fallback);
         };
+
+        const setHTML = (id, value) => {
+          const node = document.getElementById(id);
+          if (!node) {
+            return;
+          }
+          node.innerHTML = value;
+        };
+
+        const setPill = (id, className, label) => {
+          const node = document.getElementById(id);
+          if (!node) {
+            return;
+          }
+          node.className = `pill ${className}`;
+          node.textContent = label;
+        };
+
+        const setBanner = (wrapperId, valueId, value) => {
+          const wrapper = document.getElementById(wrapperId);
+          const valueNode = document.getElementById(valueId);
+          if (!wrapper || !valueNode) {
+            return;
+          }
+          if (!value) {
+            wrapper.hidden = true;
+            valueNode.textContent = "";
+            return;
+          }
+          wrapper.hidden = false;
+          valueNode.textContent = value;
+        };
+
+        const fetchJSON = async (path) => {
+          const response = await fetch(path, {
+            headers: {Accept: "application/json"}
+          });
+          if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+          }
+          return response.json();
+        };
+
+        const postJSON = async (path, payload) => {
+          const response = await fetch(path, {
+            method: "POST",
+            headers: {
+              "Accept": "application/json",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json();
+          return {ok: response.ok, data};
+        };
+
+        const durationMSLabel = (durationMS) => {
+          if (!durationMS || durationMS <= 0) {
+            return "-";
+          }
+          const totalSeconds = Math.floor(durationMS / 1000);
+          const minutes = Math.floor(totalSeconds / 60);
+          const seconds = totalSeconds % 60;
+          return `${minutes}:${String(seconds).padStart(2, "0")}`;
+        };
+
+        const buildFeaturedAlbums = (librarySnapshot) => {
+          const albums = Array.isArray(librarySnapshot?.albums) ? librarySnapshot.albums : [];
+          const primary = albums.filter((album) => !(album.source_mode === "directory_fallback" && album.track_count === 1));
+          return (primary.length ? primary : albums).slice(0, 6).map((album) => ({
+            albumUID: album.album_uid,
+            title: textValue(album.title, "未命名专辑"),
+            albumArtist: textValue(album.album_artist, "未知艺人"),
+            yearLabel: album.year > 0 ? String(album.year) : "-",
+            trackCount: album.track_count ?? 0,
+            durationLabel: durationMSLabel(album.total_duration_ms),
+            coverThumbPath: rawValue(album.cover_thumb_rel_path) ? `/artwork/${album.cover_thumb_rel_path}` : "",
+            browsePath: `/library?album_uid=${encodeURIComponent(rawValue(album.album_uid))}`
+          }));
+        };
+
+        const findNowPlaying = (playbackStatus, queueSnapshot, librarySnapshot) => {
+          const trackUID = rawValue(playbackStatus?.current_track);
+          if (!trackUID) {
+            return null;
+          }
+
+          const result = {
+            trackUID,
+            title: "",
+            artist: "",
+            albumTitle: "",
+            relativePath: "",
+            coverThumbPath: ""
+          };
+
+          const tracks = Array.isArray(librarySnapshot?.tracks) ? librarySnapshot.tracks : [];
+          const trackMatch = tracks.find((track) => rawValue(track.track_uid) === trackUID);
+          if (trackMatch) {
+            result.title = textValue(trackMatch.title, trackUID);
+            result.artist = textValue(trackMatch.artist, "");
+            result.albumTitle = textValue(trackMatch.album_title, "");
+            result.relativePath = textValue(trackMatch.relative_path, "");
+            const albums = Array.isArray(librarySnapshot?.albums) ? librarySnapshot.albums : [];
+            const albumMatch = albums.find((album) => rawValue(album.album_uid) === rawValue(trackMatch.album_uid));
+            if (albumMatch && rawValue(albumMatch.cover_thumb_rel_path)) {
+              result.coverThumbPath = `/artwork/${albumMatch.cover_thumb_rel_path}`;
+            }
+          }
+
+          const queueEntries = Array.isArray(queueSnapshot?.entries) ? queueSnapshot.entries : [];
+          const queueMatch = queueEntries.find((entry) => rawValue(entry.track_uid) === trackUID);
+          if (queueMatch) {
+            if (!result.title) {
+              result.title = textValue(queueMatch.title || queueMatch.track_uid, trackUID);
+            }
+            if (!result.relativePath) {
+              result.relativePath = textValue(queueMatch.relative_path, "");
+            }
+          }
+
+          if (!result.title) {
+            result.title = trackUID;
+          }
+
+          return result;
+        };
+
+        const titleFromRelativePath = (relativePath) => {
+          const trimmed = rawValue(relativePath);
+          if (!trimmed) {
+            return "";
+          }
+          const filename = trimmed.split("/").filter(Boolean).pop() || trimmed;
+          return filename.replace(/\.(flac|wav|mp3|m4a|aac|ogg|dsf|dff)$/i, "").trim();
+        };
+
+        const historyEntryDisplay = (entry, librarySnapshot) => {
+          const trackUID = rawValue(entry.track_uid);
+          const tracks = Array.isArray(librarySnapshot?.tracks) ? librarySnapshot.tracks : [];
+          const trackMatch = tracks.find((track) => rawValue(track.track_uid) === trackUID);
+          const relativePath = textValue(trackMatch?.relative_path || entry.relative_path, "");
+          let title = textValue(trackMatch?.title || entry.title, "");
+          if (!title || title === trackUID) {
+            const pathTitle = titleFromRelativePath(relativePath);
+            if (pathTitle && pathTitle !== trackUID) {
+              title = pathTitle;
+            }
+          }
+          return {
+            title: title || trackUID,
+            relativePath
+          };
+        };
+
+        const renderFeaturedAlbums = (librarySnapshot) => {
+          const list = document.getElementById("home-featured-albums");
+          const empty = document.getElementById("home-featured-albums-empty");
+          const emptyState = document.getElementById("home-featured-albums-empty-state");
+          const emptyMeta = document.getElementById("home-featured-albums-empty-meta");
+          if (!list || !empty || !emptyState) {
+            return;
+          }
+
+          const albums = buildFeaturedAlbums(librarySnapshot);
+          list.replaceChildren();
+
+          if (albums.length === 0) {
+            list.hidden = true;
+            empty.hidden = false;
+            emptyState.hidden = false;
+            empty.textContent = "曲库里还没有可展示的专辑。";
+            if (emptyMeta) {
+              emptyMeta.textContent = "完成扫描后，首页会先给出最近专辑入口。";
+            }
+            return;
+          }
+
+          albums.forEach((album) => {
+            const article = document.createElement("article");
+            article.className = "album-shelf-card";
+
+            const cover = document.createElement("a");
+            cover.className = "album-shelf-cover";
+            cover.href = album.browsePath;
+            if (album.coverThumbPath) {
+              const image = document.createElement("img");
+              image.src = album.coverThumbPath;
+              image.alt = `${album.title} cover`;
+              image.className = "library-cover-art";
+              cover.appendChild(image);
+            } else {
+              const placeholder = document.createElement("span");
+              placeholder.className = "album-shelf-placeholder";
+              placeholder.textContent = album.title;
+              cover.appendChild(placeholder);
+            }
+            article.appendChild(cover);
+
+            const title = document.createElement("p");
+            title.className = "album-shelf-title";
+            title.textContent = album.title;
+            article.appendChild(title);
+
+            const meta = document.createElement("p");
+            meta.className = "album-shelf-meta";
+            meta.textContent = `${album.albumArtist} · ${album.yearLabel}`;
+            article.appendChild(meta);
+
+            const count = document.createElement("p");
+            count.className = "album-shelf-meta";
+            count.textContent = `${album.trackCount} 首 · ${album.durationLabel}`;
+            article.appendChild(count);
+
+            const link = document.createElement("a");
+            link.className = "button-link button-link-secondary album-shelf-link";
+            link.href = album.browsePath;
+            link.textContent = "查看专辑";
+            article.appendChild(link);
+
+            list.appendChild(article);
+          });
+
+          list.hidden = false;
+          empty.hidden = true;
+          emptyState.hidden = true;
+        };
+
+        const renderHeroArtwork = (nowPlaying, librarySnapshot) => {
+          const image = document.getElementById("home-hero-artwork-image");
+          const placeholder = document.getElementById("home-hero-artwork-placeholder");
+          const caption = document.getElementById("home-hero-caption");
+          const albumLine = document.getElementById("home-hero-album-line");
+          const subtitle = document.getElementById("home-now-playing-subtitle");
+          const footerTitle = document.getElementById("home-player-title");
+          const heroTitle = document.getElementById("home-hero-track-title");
+          const heroSubtitle = document.getElementById("home-hero-track-subtitle");
+          if (!image || !placeholder || !caption || !albumLine || !subtitle || !footerTitle || !heroTitle || !heroSubtitle) {
+            return;
+          }
+
+          const featuredAlbums = buildFeaturedAlbums(librarySnapshot);
+          const fallbackAlbum = featuredAlbums.find((album) => album.coverThumbPath) || featuredAlbums[0];
+          const artworkPath = nowPlaying?.coverThumbPath || fallbackAlbum?.coverThumbPath || "";
+
+          if (artworkPath) {
+            image.src = artworkPath;
+            image.alt = nowPlaying?.title || fallbackAlbum?.title || "专辑封面";
+            image.hidden = false;
+            placeholder.hidden = true;
+          } else {
+            image.hidden = true;
+            placeholder.hidden = false;
+          }
+
+          const albumText = nowPlaying?.albumTitle || fallbackAlbum?.title || "本地模式 · 曲库已就绪";
+          caption.textContent = albumText;
+          albumLine.textContent = albumText;
+          const subtitleText = nowPlaying
+            ? textValue(nowPlaying.artist || nowPlaying.relativePath, "从曲库挑一张专辑开始播放")
+            : "从曲库挑一张专辑开始播放";
+          const titleText = nowPlaying?.title || "还没有加入歌曲";
+          subtitle.textContent = subtitleText;
+          heroSubtitle.textContent = subtitleText;
+          footerTitle.textContent = titleText;
+          heroTitle.textContent = titleText;
+        };
+
+        const setCommandBanners = (message, error) => {
+          setBanner("home-command-message", "home-command-message-value", message);
+          setBanner("home-command-error", "home-command-error-value", error);
+        };
+
+        const renderSystemSummary = (payload) => {
+          setText("defaults-mode", payload.mode === "local" ? "本地模式" : textValue(payload.mode));
+          setText("defaults-interface", interfaceModeLabel(payload.interface_mode));
+          setText("defaults-dsd-policy", payload.dsd_policy);
+          setText("defaults-password-configured", boolLabel(payload.password_configured, "已设置", "未设置"));
+          setText("defaults-ssh-enabled", boolLabel(payload.ssh_enabled));
+          setText("defaults-config-path", payload.config_path);
+          setText("defaults-command-socket", payload.command_socket);
+          setText("defaults-event-socket", payload.event_socket);
+          setText("defaults-library-db", payload.library_db_path);
+        };
+
+        const renderProvisioning = (payload) => {
+          const label = provisioningStateLabel(payload.state, payload.available);
+          if (!payload.available) {
+            setPill("provisioning-state-pill", "pill-offline", label);
+          } else if (payload.state === "connected") {
+            setPill("provisioning-state-pill", "pill-ok", label);
+          } else if (payload.state === "failed") {
+            setPill("provisioning-state-pill", "pill-offline", label);
+          } else {
+            setPill("provisioning-state-pill", "pill-current", label);
+          }
+
+          setText("provisioning-message", payload.message);
+          setText("provisioning-ssid", payload.ssid);
+          setText("provisioning-ip", payload.ip);
+          setText("provisioning-wifi-ip", payload.wifi_ip);
+          setText("provisioning-wired-ip", payload.wired_ip);
+          setText("provisioning-all-ips", payload.all_ips);
+          setText("provisioning-wifi-interface", payload.wifi_interface);
+          setText("provisioning-error-code", payload.error_code);
+          setText("provisioning-bluetooth-address", payload.bluetooth_address);
+          setText("provisioning-rfcomm-channel", payload.rfcomm_channel);
+          setText("provisioning-sdp-record-handles", payload.sdp_record_handles);
+          setText("provisioning-updated-at", payload.updated_at);
+          setText("home-overview-network", payload.ip || payload.wifi_ip || payload.wired_ip, "离线");
+          setText("home-overview-network-meta", label, "配网空闲");
+          setBanner("provisioning-apply-output", "provisioning-apply-output-value", payload.apply_output);
+          setBanner("provisioning-diagnostic-hint", "provisioning-diagnostic-hint-value", payload.diagnostic_hint);
+          setBanner("provisioning-read-error", "provisioning-read-error-value", payload.read_error);
+        };
+
+        const renderPlaybackStatus = (payload) => {
+          latestPlaybackStatus = payload;
+          const primaryAction = transportPrimaryAction(payload.state);
+          const primaryLabel = transportPrimaryLabel(payload.state);
+          document.querySelectorAll("[data-transport-primary]").forEach((button) => {
+            button.value = primaryAction;
+            button.textContent = primaryLabel;
+          });
+          if (rawValue(payload.current_track)) {
+            document.querySelectorAll("[data-transport-track-id]").forEach((input) => {
+              input.value = payload.current_track;
+            });
+          }
+          setPill("playback-socket-pill", payload.available ? "pill-ok" : "pill-offline", payload.available ? "在线" : "离线");
+          setBanner("playback-error", "playback-error-value", payload.error);
+          setText("playback-state", playbackStateLabel(payload.state), "未知状态");
+          setText("playback-order-mode", orderModeLabel(payload.order_mode));
+          setText("playback-repeat-mode", repeatModeLabel(payload.repeat_mode));
+          setText("playback-current-track", payload.current_track);
+          setText("playback-last-command", payload.last_command);
+          setText("playback-queue-entries", payload.queue_entries ?? 0, "0");
+          setText("home-overview-state", playbackStateLabel(payload.state), "未知状态");
+          setText("home-overview-track", payload.current_track, "还没有加入歌曲");
+          setHTML(
+            "playback-engine-summary",
+            `${playbackStateLabel(payload.state)} · ${orderModeLabel(payload.order_mode)} · ${repeatModeLabel(payload.repeat_mode)}`
+          );
+          setText("home-player-state", playbackStateLabel(payload.state), "已停止");
+          setText("home-player-modes", `${orderModeLabel(payload.order_mode)} · ${repeatModeLabel(payload.repeat_mode)}`, "顺序播放 · 不循环");
+          setText("home-player-queue-count", `${payload.queue_entries ?? 0} 首待播`, "0 首待播");
+          setText("home-hero-state", playbackStateLabel(payload.state), "已停止");
+          setText("home-hero-modes", `${orderModeLabel(payload.order_mode)} · ${repeatModeLabel(payload.repeat_mode)}`, "顺序播放 · 不循环");
+          setText("home-hero-queue-count", `${payload.queue_entries ?? 0} 首待播`, "0 首待播");
+        };
+
+        const buildHistoryEntry = (entry, displayIndex, isCurrent, librarySnapshot) => {
+          const article = document.createElement("article");
+          article.className = `queue-item${isCurrent ? " queue-item-current" : ""}`;
+          const orderLabel = String(displayIndex).padStart(2, "0");
+          const display = historyEntryDisplay(entry, librarySnapshot);
+
+          const order = document.createElement("div");
+          order.className = "queue-order";
+          order.textContent = orderLabel;
+          article.appendChild(order);
+
+          const copy = document.createElement("div");
+          copy.className = "queue-copy";
+
+          const title = document.createElement("p");
+          title.className = "queue-title";
+          title.append(document.createTextNode(textValue(display.title || entry.track_uid)));
+          if (isCurrent) {
+            const current = document.createElement("span");
+            current.className = "pill pill-current";
+            current.textContent = "当前";
+            title.appendChild(current);
+          }
+          copy.appendChild(title);
+
+          const meta = document.createElement("p");
+          meta.className = "queue-meta";
+          meta.textContent = `播放记录 ${orderLabel}${isCurrent ? " · 当前播放" : " · 已播放"}`;
+          copy.appendChild(meta);
+
+          const path = document.createElement("p");
+          path.className = "queue-meta";
+          path.textContent = textValue(display.relativePath);
+          copy.appendChild(path);
+
+          article.appendChild(copy);
+
+          const action = document.createElement("form");
+          action.method = "post";
+          action.action = "/commands";
+          action.className = "queue-history-action";
+          const trackInput = document.createElement("input");
+          trackInput.type = "hidden";
+          trackInput.name = "track_id";
+          trackInput.value = rawValue(entry.track_uid);
+          action.appendChild(trackInput);
+          const playButton = document.createElement("button");
+          playButton.type = "submit";
+          playButton.name = "action";
+          playButton.value = "play_history";
+          playButton.textContent = "播放";
+          action.appendChild(playButton);
+          article.appendChild(action);
+          return article;
+        };
+
+        const renderQueue = (payload) => {
+          latestQueueSnapshot = payload;
+          setPill("queue-socket-pill", payload.available ? "pill-ok" : "pill-offline", payload.available ? "在线" : "离线");
+          setText("queue-current-order-index", payload.current_order_index ?? "-", "-");
+          setText("queue-overview-order", orderModeLabel(payload.order_mode), "-");
+          setText("queue-overview-repeat", repeatModeLabel(payload.repeat_mode), "-");
+          setText("queue-overview-index", payload.current_order_index ?? "-", "-");
+          setBanner("queue-error", "queue-error-value", payload.error);
+
+          const entries = Array.isArray(payload.entries) ? payload.entries : [];
+          setText("queue-overview-count", entries.length, "0");
+
+          if (latestLibrarySnapshot && latestPlaybackStatus) {
+            renderHeroArtwork(findNowPlaying(latestPlaybackStatus, payload, latestLibrarySnapshot), latestLibrarySnapshot);
+          }
+        };
+
+        const renderHistory = (payload, playbackStatus = latestPlaybackStatus, librarySnapshot = latestLibrarySnapshot) => {
+          setBanner("queue-error", "queue-error-value", payload?.error);
+          const list = document.getElementById("queue-list");
+          const empty = document.getElementById("queue-empty");
+          const emptyState = document.getElementById("queue-empty-state");
+          const emptyMeta = document.getElementById("queue-empty-meta");
+          if (!list || !empty || !emptyState) {
+            return;
+          }
+
+	          list.replaceChildren();
+	          const recentEntries = Array.isArray(payload?.entries) ? payload.entries : [];
+	          const entries = [...recentEntries];
+	          setText("queue-overview-count", entries.length, "0");
+	          if (entries.length > 0) {
+	            const currentTrack = playbackIsActive(playbackStatus?.state) ? rawValue(playbackStatus?.current_track) : "";
+	            let currentMarked = false;
+	            entries.forEach((entry, index) => {
+	              const isCurrent = Boolean(currentTrack) && !currentMarked && rawValue(entry.track_uid) === currentTrack;
+	              if (isCurrent) {
+	                currentMarked = true;
+	              }
+	              list.appendChild(buildHistoryEntry(entry, index + 1, isCurrent, librarySnapshot));
+	            });
+            list.hidden = false;
+            empty.hidden = true;
+            emptyState.hidden = true;
+          } else {
+            list.hidden = true;
+            empty.hidden = false;
+            emptyState.hidden = false;
+            empty.textContent = payload?.available ? "还没有播放历史。" : "播放历史暂时不可用。";
+            if (emptyMeta) {
+              emptyMeta.textContent = payload?.available
+                ? "从曲库开始播放后，这里会记录已到达过的曲目。"
+                : "当前先保留播放器主操作，等播放器连接恢复后再继续补全。";
+            }
+          }
+        };
+
+        const refreshHomeLibrary = (librarySnapshot) => {
+          latestLibrarySnapshot = librarySnapshot;
+          renderFeaturedAlbums(librarySnapshot);
+          if (latestPlaybackStatus && latestQueueSnapshot) {
+            renderHeroArtwork(findNowPlaying(latestPlaybackStatus, latestQueueSnapshot, librarySnapshot), librarySnapshot);
+            const nowPlaying = findNowPlaying(latestPlaybackStatus, latestQueueSnapshot, librarySnapshot);
+            setText("playback-current-track-hero", nowPlaying?.title || latestPlaybackStatus.current_track, "还没有加入歌曲");
+            setText("home-hero-track-title", nowPlaying?.title || latestPlaybackStatus.current_track, "还没有加入歌曲");
+          }
+        };
+
+        const refreshHomeFromAPI = async (reason) => {
+          const [systemSummary, provisioning, playbackStatus, queueSnapshot, historySnapshot, librarySnapshot] = await Promise.all([
+            fetchJSON(endpoints.systemSummary),
+            fetchJSON(endpoints.provisioning),
+            fetchJSON(endpoints.playbackStatus),
+            fetchJSON(endpoints.playbackQueue),
+            fetchJSON(endpoints.playbackHistory),
+            fetchJSON(endpoints.librarySnapshot)
+          ]);
+          renderSystemSummary(systemSummary);
+	          renderProvisioning(provisioning);
+	          renderPlaybackStatus(playbackStatus);
+	          renderQueue(queueSnapshot);
+	          refreshHomeLibrary(librarySnapshot);
+	          renderHistory(historySnapshot, playbackStatus, librarySnapshot);
+          statusNode.innerHTML = `首页已通过 <code>/api/v1/...</code> 完成 ${reason} 同步。`;
+        };
+
+        const schedulePlaybackRefresh = (label) => {
+          if (refreshPending) {
+            return;
+          }
+          refreshPending = true;
+          statusNode.textContent = `检测到播放事件 ${label}，正在刷新首页。`;
+          window.setTimeout(async () => {
+            try {
+              const [playbackStatus, queueSnapshot, historySnapshot] = await Promise.all([
+                fetchJSON(endpoints.playbackStatus),
+                fetchJSON(endpoints.playbackQueue),
+                fetchJSON(endpoints.playbackHistory)
+              ]);
+              renderPlaybackStatus(playbackStatus);
+              renderQueue(queueSnapshot);
+              renderHistory(historySnapshot, playbackStatus);
+              if (latestLibrarySnapshot) {
+                const nowPlaying = findNowPlaying(playbackStatus, queueSnapshot, latestLibrarySnapshot);
+                renderHeroArtwork(nowPlaying, latestLibrarySnapshot);
+                setText("playback-current-track-hero", nowPlaying?.title || playbackStatus.current_track, "还没有加入歌曲");
+                setText("home-hero-track-title", nowPlaying?.title || playbackStatus.current_track, "还没有加入歌曲");
+              }
+              statusNode.innerHTML = `首页已通过 <code>/api/v1/...</code> 响应 ${label}。`;
+            } catch (error) {
+              statusNode.textContent = `首页实时刷新失败：${error.message}。SSR 内容仍然可见。`;
+            } finally {
+              refreshPending = false;
+            }
+          }, 120);
+        };
+
+        document.addEventListener("submit", async (event) => {
+          const form = event.target;
+          if (!(form instanceof HTMLFormElement)) {
+            return;
+          }
+          if (form.getAttribute("action") !== "/commands") {
+            return;
+          }
+
+          const submitter = event.submitter;
+          const formData = new FormData(form);
+          const action = rawValue(submitter && "value" in submitter ? submitter.value : formData.get("action"));
+          if (!action) {
+            return;
+          }
+
+          event.preventDefault();
+
+          try {
+            const result = await postJSON(endpoints.playbackCommands, {
+              action,
+              track_id: rawValue(formData.get("track_id"))
+            });
+            setCommandBanners(result.data.message, result.data.error);
+            renderPlaybackStatus(result.data.playback_status || {});
+            renderQueue(result.data.queue || {});
+            renderHistory(await fetchJSON(endpoints.playbackHistory), result.data.playback_status || latestPlaybackStatus);
+            if (latestLibrarySnapshot && latestPlaybackStatus && latestQueueSnapshot) {
+              const nowPlaying = findNowPlaying(latestPlaybackStatus, latestQueueSnapshot, latestLibrarySnapshot);
+              renderHeroArtwork(nowPlaying, latestLibrarySnapshot);
+              setText("playback-current-track-hero", nowPlaying?.title || latestPlaybackStatus.current_track, "还没有加入歌曲");
+              setText("home-hero-track-title", nowPlaying?.title || latestPlaybackStatus.current_track, "还没有加入歌曲");
+            }
+            statusNode.innerHTML = `首页已通过 <code>/api/v1/playback/commands</code> 执行 ${action}。`;
+          } catch (error) {
+            setCommandBanners("", error.message);
+            statusNode.textContent = `播放命令 API 失败：${error.message}。旧表单 fallback 仍保留。`;
+          }
+        });
 
         const watchedEvents = [
           "PLAYBACK_STARTED",
@@ -307,22 +1249,26 @@
         ];
 
         watchedEvents.forEach((eventName) => {
-          stream.addEventListener(eventName, () => scheduleReload(eventName.toLowerCase()));
+          stream.addEventListener(eventName, () => schedulePlaybackRefresh(eventName.toLowerCase()));
         });
 
         stream.addEventListener("STREAM_ERROR", () => {
-          reloadPending = false;
-          statusNode.textContent = "Live playback sync disconnected. The page will reconnect automatically.";
+          refreshPending = false;
+          statusNode.textContent = "实时播放同步已断开，页面会自动重连。";
         });
 
-        stream.onopen = () => {
-          reloadPending = false;
-          statusNode.textContent = "Live playback sync is on. The page refreshes only when playback events happen.";
+        stream.onerror = () => {
+          refreshPending = false;
+          statusNode.textContent = "实时播放同步正在重连，手动控制仍然可用。";
         };
 
-        stream.onerror = () => {
-          reloadPending = false;
-          statusNode.textContent = "Live playback sync is reconnecting. Manual controls still work.";
+        stream.onopen = async () => {
+          refreshPending = false;
+          try {
+            await refreshHomeFromAPI("初次加载");
+          } catch (error) {
+            statusNode.textContent = `首页 API 初始化失败：${error.message}。SSR 内容仍然可见。`;
+          }
         };
       })();
     </script>

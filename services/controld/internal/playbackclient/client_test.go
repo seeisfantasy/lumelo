@@ -137,6 +137,48 @@ func TestExecuteFormatsQueueReplaceCommand(t *testing.T) {
 	<-done
 }
 
+func TestPlayQueueFormatsQueuePlayCommand(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 256)
+		n, _ := conn.Read(buf)
+		if string(buf[:n]) != "QUEUE_PLAY [\"side a 01\",\"side b 02\"]\n" {
+			t.Errorf("unexpected command line: %q", string(buf[:n]))
+			return
+		}
+
+		_, _ = conn.Write([]byte("OK\tkind=ack\taction=queue_play\tstate=quiet_active\tcurrent_track=side a 01\n"))
+	}()
+
+	client := New(socketPath, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	message, err := client.PlayQueue(ctx, []string{"side a 01", "side b 02"})
+	if err != nil {
+		t.Fatalf("play queue: %v", err)
+	}
+	if message != "QUEUE_PLAY -> state=quiet_active current=side a 01" {
+		t.Fatalf("unexpected execute message: %s", message)
+	}
+
+	<-done
+}
+
 func TestQueueSnapshotParsesSnapshotPayload(t *testing.T) {
 	socketPath := shortSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
@@ -224,6 +266,93 @@ func TestExecuteFormatsQueueSnapshotResponse(t *testing.T) {
 		t.Fatalf("execute queue_snapshot: %v", err)
 	}
 	if message != "QUEUE_SNAPSHOT -> entries=2 current_index=1" {
+		t.Fatalf("unexpected execute message: %s", message)
+	}
+
+	<-done
+}
+
+func TestHistorySnapshotParsesSnapshotPayload(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 256)
+		n, _ := conn.Read(buf)
+		if string(buf[:n]) != "HISTORY_SNAPSHOT\n" {
+			t.Errorf("unexpected command line: %q", string(buf[:n]))
+			return
+		}
+
+		_, _ = conn.Write([]byte("OK\tkind=history_snapshot\tpayload={\"entries\":[{\"played_at\":123,\"track_uid\":\"track-a\",\"volume_uuid\":\"vol-1\",\"relative_path\":\"Album/track-a.flac\",\"title\":\"Track A\",\"duration_ms\":201000}]}\n"))
+	}()
+
+	client := New(socketPath, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	snapshot := client.HistorySnapshot(ctx)
+	if !snapshot.Available {
+		t.Fatalf("expected history snapshot to be available, got error: %s", snapshot.Error)
+	}
+	if len(snapshot.Entries) != 1 {
+		t.Fatalf("unexpected entry count: %d", len(snapshot.Entries))
+	}
+	if snapshot.Entries[0].TrackUID != "track-a" || snapshot.Entries[0].Title == nil || *snapshot.Entries[0].Title != "Track A" {
+		t.Fatalf("unexpected history entry: %+v", snapshot.Entries[0])
+	}
+
+	<-done
+}
+
+func TestExecuteFormatsHistorySnapshotResponse(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 256)
+		n, _ := conn.Read(buf)
+		if string(buf[:n]) != "HISTORY_SNAPSHOT\n" {
+			t.Errorf("unexpected command line: %q", string(buf[:n]))
+			return
+		}
+
+		_, _ = conn.Write([]byte("OK\tkind=history_snapshot\tpayload={\"entries\":[{\"played_at\":123,\"track_uid\":\"track-a\",\"volume_uuid\":\"vol-1\",\"relative_path\":\"Album/track-a.flac\",\"title\":\"Track A\",\"duration_ms\":201000},{\"played_at\":122,\"track_uid\":\"track-b\",\"volume_uuid\":\"vol-1\",\"relative_path\":\"Album/track-b.flac\",\"title\":\"Track B\",\"duration_ms\":202000}]}\n"))
+	}()
+
+	client := New(socketPath, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	message, err := client.Execute(ctx, "history_snapshot", "")
+	if err != nil {
+		t.Fatalf("execute history_snapshot: %v", err)
+	}
+	if message != "HISTORY_SNAPSHOT -> entries=2" {
 		t.Fatalf("unexpected execute message: %s", message)
 	}
 

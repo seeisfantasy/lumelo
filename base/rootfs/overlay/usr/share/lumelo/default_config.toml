@@ -2,6 +2,6 @@
 
 mode = "local"
 interface_mode = "ethernet"
-dsd_output_policy = "strict_native"
+dsd_output_policy = "native_dsd"
 ssh_enabled = false
 ui_theme = "system"

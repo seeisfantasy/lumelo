@@ -16,6 +16,8 @@ import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -23,16 +25,15 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.ConnectivityManager;
-import android.net.LinkAddress;
-import android.net.LinkProperties;
-import android.net.Network;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.util.SparseArray;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
@@ -42,10 +43,14 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.net.Inet4Address;
-import java.net.InetAddress;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -55,10 +60,15 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class MainActivity extends Activity {
     private static final String PREFS_NAME = "lumelo_setup";
     private static final String PREF_LAST_WEB_URL = "last_web_url";
+    private static final String PREF_LAST_T4_SSID = "last_t4_ssid";
     private static final String PREF_LAST_CLASSIC_ADDRESS = "last_classic_address";
     private static final String PREF_LAST_CLASSIC_NAME = "last_classic_name";
     private enum ScanMode {
@@ -80,6 +90,10 @@ public class MainActivity extends Activity {
     private static final long SCAN_WINDOW_MS = 12_000;
     private static final long STATUS_POLL_INTERVAL_MS = 3_000;
     private static final long STATUS_POLL_TIMEOUT_MS = 60_000;
+    private static final int RSSI_UNKNOWN = Integer.MIN_VALUE;
+    private static final int WEBUI_PROBE_TIMEOUT_MS = 2_000;
+    private static final int WEBUI_SUBNET_SCAN_TIMEOUT_MS = 800;
+    private static final int WEBUI_SUBNET_SCAN_WORKERS = 12;
 
     private static final UUID SERVICE_UUID = UUID.fromString("7b6a0001-8d8b-4e31-9f0a-9a9f4d1f2c10");
     private static final UUID DEVICE_INFO_UUID = UUID.fromString("7b6a0002-8d8b-4e31-9f0a-9a9f4d1f2c10");
@@ -114,10 +128,12 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private TextView buildInfoView;
     private TextView environmentView;
+    private TextView classicSessionView;
     private TextView scanSummaryView;
     private TextView selectedView;
     private TextView deviceInfoView;
     private TextView resultView;
+    private TextView credentialFormView;
     private TextView debugLogView;
     private Button scanButton;
     private Button testScanButton;
@@ -132,10 +148,16 @@ public class MainActivity extends Activity {
     private Button openHealthzButton;
     private Button clearLogButton;
     private Button exportLogButton;
+    private Button copySummaryButton;
     private EditText ssidInput;
     private EditText passwordInput;
     private String webUrl;
     private boolean mainInterfaceOpenedForSession;
+    private String passwordEditedForSsid = "";
+    private volatile String lastStatusText = "";
+    private volatile String lastWebUiProbeSummary = "";
+    private volatile String lastSubnetScanSummary = "";
+    private long classicFailureProbeSerial;
     private long statusPollingDeadlineMs;
     private boolean statusPollingActive;
     private final ArrayDeque<String> debugLines = new ArrayDeque<>();
@@ -168,9 +190,11 @@ public class MainActivity extends Activity {
                     || BluetoothDevice.ACTION_NAME_CHANGED.equals(action)) {
                 BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                 if (device != null) {
+                    short intentRssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE);
                     handleClassicScanResult(
                             device,
-                            sanitize(intent.getStringExtra(BluetoothDevice.EXTRA_NAME))
+                            sanitize(intent.getStringExtra(BluetoothDevice.EXTRA_NAME)),
+                            intentRssi == Short.MIN_VALUE ? RSSI_UNKNOWN : intentRssi
                     );
                 }
                 return;
@@ -240,6 +264,9 @@ public class MainActivity extends Activity {
         environmentView = label("Environment: checking Bluetooth and permissions...");
         root.addView(environmentView, matchWrap());
 
+        classicSessionView = label("Classic session: idle");
+        root.addView(classicSessionView, matchWrap());
+
         scanSummaryView = label("Scan summary: not started");
         root.addView(scanSummaryView, matchWrap());
 
@@ -265,7 +292,13 @@ public class MainActivity extends Activity {
 
         connectButton = button("Connect");
         connectButton.setEnabled(false);
-        connectButton.setOnClickListener(view -> connectSelectedDevice());
+        connectButton.setOnClickListener(view -> {
+            if (classicTransport != null && classicTransport.isConnectInProgress()) {
+                disconnectFromDevice();
+            } else {
+                connectSelectedDevice();
+            }
+        });
         root.addView(connectButton, matchWrap());
 
         deviceInfoView = label("Device info: not connected");
@@ -276,6 +309,26 @@ public class MainActivity extends Activity {
 
         passwordInput = input("Wi-Fi password", true);
         root.addView(passwordInput, matchWrap());
+
+        credentialFormView = label("Credential form: waiting for SSID and password.");
+        root.addView(credentialFormView, matchWrap());
+
+        ssidInput.addTextChangedListener(simpleTextWatcher(this::refreshCredentialFormSummary));
+        passwordInput.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable editable) {
+                passwordEditedForSsid = sanitize(ssidInput.getText().toString());
+                refreshCredentialFormSummary();
+            }
+        });
 
         useCurrentWifiButton = button("Use Current Wi-Fi");
         useCurrentWifiButton.setOnClickListener(view -> fillCurrentWifiSsid());
@@ -327,6 +380,10 @@ public class MainActivity extends Activity {
         exportLogButton.setOnClickListener(view -> exportDiagnostics());
         root.addView(exportLogButton, matchWrap());
 
+        copySummaryButton = button("Copy Diagnostic Summary");
+        copySummaryButton.setOnClickListener(view -> copyDiagnosticSummary());
+        root.addView(copySummaryButton, matchWrap());
+
         debugLogView = label("Debug log:\n- app ready");
         root.addView(debugLogView, matchWrap());
     }
@@ -348,27 +405,52 @@ public class MainActivity extends Activity {
         classicTransport = new ClassicBluetoothTransport(new ClassicBluetoothTransport.Listener() {
             @Override
             public void onClassicConnected(BluetoothDevice device) {
+                cancelClassicFailureProbe();
+                clearConnectivityDiagnostics();
                 rememberClassicDevice(device);
                 runOnUiThread(() -> {
                     sendButton.setEnabled(true);
                     readStatusButton.setEnabled(true);
                     disconnectButton.setEnabled(true);
+                    refreshConnectButtonState();
                 });
                 setStatus("Classic Bluetooth connected. Reading T4 info...");
                 logEvent("Classic Bluetooth connected to " + displayName(device));
             }
 
             @Override
+            public void onClassicReconnecting(String message) {
+                cancelClassicFailureProbe();
+                stopStatusPolling();
+                runOnUiThread(() -> {
+                    sendButton.setEnabled(false);
+                    readStatusButton.setEnabled(false);
+                    disconnectButton.setEnabled(true);
+                    refreshConnectButtonState();
+                });
+                setStatus(withRememberedWebUiHint(message));
+                logEvent(message);
+            }
+
+            @Override
             public void onClassicDisconnected(String message) {
+                cancelClassicFailureProbe();
                 stopStatusPolling();
                 resetProvisioningSession();
-                setStatus(message);
+                setStatus(withRememberedWebUiHint(message));
                 logEvent(message);
             }
 
             @Override
             public void onClassicDeviceInfo(String payload) {
-                runOnUiThread(() -> deviceInfoView.setText("Device info: " + payload));
+                runOnUiThread(() -> deviceInfoView.setText(formatDeviceInfoText(payload)));
+                rememberReportedWebUiUrl(deriveWebUiUrl(
+                        "",
+                        extractJsonString(payload, "ip"),
+                        extractJsonString(payload, "wifi_ip"),
+                        extractJsonString(payload, "wired_ip"),
+                        extractJsonInt(payload, "web_port")
+                ));
                 logEvent("Classic device info payload: " + payload);
             }
 
@@ -379,7 +461,11 @@ public class MainActivity extends Activity {
 
             @Override
             public void onClassicError(String message) {
-                setStatus(message);
+                setStatus(withClassicConnectRecoveryHint(message));
+                if (isClassicConnectFailureMessage(message)) {
+                    stopStatusPolling();
+                    refreshClassicConnectFailureUi();
+                }
                 logEvent(message);
             }
 
@@ -403,13 +489,17 @@ public class MainActivity extends Activity {
                     new String[]{
                             Manifest.permission.BLUETOOTH_SCAN,
                             Manifest.permission.BLUETOOTH_CONNECT,
+                            Manifest.permission.ACCESS_COARSE_LOCATION,
                             Manifest.permission.ACCESS_FINE_LOCATION,
                     },
                     REQUEST_BLE_PERMISSIONS
             );
         } else {
             requestPermissions(
-                    new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
+                    new String[]{
+                            Manifest.permission.ACCESS_COARSE_LOCATION,
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                    },
                     REQUEST_BLE_PERMISSIONS
             );
         }
@@ -455,7 +545,7 @@ public class MainActivity extends Activity {
         deviceAdapter.clear();
         selectedDevice = null;
         selectedView.setText("Selected: none");
-        connectButton.setEnabled(false);
+        refreshConnectButtonState();
         refreshScanSummary();
 
         scanning = true;
@@ -496,13 +586,23 @@ public class MainActivity extends Activity {
         if (activeScanMode == ScanMode.LUMELO) {
             stopClassicScan();
             int matchedDevices = countClassicNameMatches();
+            int rememberedDevices = countRememberedCandidates();
             if (devices.isEmpty()) {
                 setStatus("Scan finished. No Lumelo device found.");
                 logEvent("Classic Bluetooth scan finished: no Lumelo device found");
             } else if (matchedDevices == 0) {
-                setStatus("Scan finished. No named Lumelo device found. Showing classic candidates.");
-                logEvent("Classic Bluetooth scan finished: no named Lumelo match; showing "
-                        + devices.size() + " classic candidate(s)");
+                if (rememberedDevices == 1 && selectedDevice != null) {
+                    setStatus("Scan finished. No named Lumelo device found. Selected the last successful T4 candidate.");
+                    logEvent("Classic Bluetooth scan finished: no named Lumelo match; selected 1 remembered classic candidate");
+                } else if (rememberedDevices > 0) {
+                    setStatus("Scan finished. No named Lumelo device found. Showing last successful T4 candidate(s) first.");
+                    logEvent("Classic Bluetooth scan finished: no named Lumelo match; showing "
+                            + rememberedDevices + " remembered classic candidate(s) first");
+                } else {
+                    setStatus("Scan finished. No named Lumelo device found. Showing classic candidates.");
+                    logEvent("Classic Bluetooth scan finished: no named Lumelo match; showing "
+                            + devices.size() + " classic candidate(s)");
+                }
             } else {
                 setStatus("Scan finished.");
                 logEvent("Classic Bluetooth scan finished: found " + matchedDevices
@@ -564,7 +664,7 @@ public class MainActivity extends Activity {
             return;
         }
         for (BluetoothDevice bondedDevice : bluetoothAdapter.getBondedDevices()) {
-            ScanObservation observation = describeClassicObservation(bondedDevice, "");
+            ScanObservation observation = describeClassicObservation(bondedDevice, "", RSSI_UNKNOWN);
             if (observation == null || !observation.nameMatch) {
                 continue;
             }
@@ -594,8 +694,8 @@ public class MainActivity extends Activity {
             if (observation != null) {
                 upsertClassicObservation(rememberedDevice, observation);
             }
-        } catch (IllegalArgumentException ignored) {
-            // Ignore invalid persisted addresses from older debug builds.
+        } catch (IllegalArgumentException exception) {
+            logEvent("Ignoring invalid remembered classic address: " + rememberedAddress);
         }
     }
 
@@ -643,7 +743,15 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private void handleClassicScanResult(BluetoothDevice device, String discoveredName) {
-        ScanObservation observation = describeClassicObservation(device, discoveredName);
+        handleClassicScanResult(device, discoveredName, RSSI_UNKNOWN);
+    }
+
+    private void handleClassicScanResult(BluetoothDevice device, String discoveredName, int rssi) {
+        int effectiveRssi = rssi;
+        if (effectiveRssi == RSSI_UNKNOWN) {
+            effectiveRssi = knownRssiFor(device == null ? "" : device.getAddress());
+        }
+        ScanObservation observation = describeClassicObservation(device, discoveredName, effectiveRssi);
         if (device == null || observation == null) {
             return;
         }
@@ -759,9 +867,28 @@ public class MainActivity extends Activity {
             return;
         }
 
+        BluetoothDevice rememberedDevice = null;
+        int rememberedCount = 0;
+        for (int index = 0; index < scanObservations.size(); index++) {
+            ScanObservation observation = scanObservations.get(index);
+            if (!observation.remembered) {
+                continue;
+            }
+            rememberedCount++;
+            rememberedDevice = devices.get(index);
+        }
+        if (matchedCount == 0 && rememberedCount == 1 && rememberedDevice != null) {
+            int rememberedIndex = devices.indexOf(rememberedDevice);
+            setSelectedScanDevice(
+                    rememberedDevice,
+                    rememberedIndex >= 0 ? scanObservations.get(rememberedIndex) : null
+            );
+            return;
+        }
+
         selectedDevice = null;
         selectedView.setText("Selected: none");
-        connectButton.setEnabled(false);
+        refreshConnectButtonState();
     }
 
     @SuppressLint("MissingPermission")
@@ -769,11 +896,15 @@ public class MainActivity extends Activity {
         selectedDevice = device;
         if (selectedDevice == null) {
             selectedView.setText("Selected: none");
-            connectButton.setEnabled(false);
+            refreshConnectButtonState();
             return;
         }
-        selectedView.setText("Selected: " + displayName(selectedDevice));
-        connectButton.setEnabled(true);
+        if (observation != null && observation.remembered && !observation.nameMatch) {
+            selectedView.setText("Selected: last successful T4 candidate " + displayName(selectedDevice));
+        } else {
+            selectedView.setText("Selected: " + displayName(selectedDevice));
+        }
+        refreshConnectButtonState();
         if (observation != null && !isProvisioningSessionConnected()) {
             resultView.setText("Selected candidate:\n" + observation.detailText);
         }
@@ -781,6 +912,20 @@ public class MainActivity extends Activity {
 
     private boolean isProvisioningSessionConnected() {
         return (classicTransport != null && classicTransport.isConnected()) || gatt != null;
+    }
+
+    private void refreshConnectButtonState() {
+        if (connectButton == null) {
+            return;
+        }
+        boolean connectPending = classicTransport != null && classicTransport.isConnectInProgress();
+        if (connectPending) {
+            connectButton.setText("Cancel Connect");
+            connectButton.setEnabled(true);
+            return;
+        }
+        connectButton.setText("Connect");
+        connectButton.setEnabled(selectedDevice != null && !isProvisioningSessionConnected());
     }
 
     private boolean shouldIncludeScanResult(ScanObservation observation) {
@@ -791,19 +936,25 @@ public class MainActivity extends Activity {
     }
 
     @SuppressLint("MissingPermission")
-    private ScanObservation describeClassicObservation(BluetoothDevice device, String discoveredName) {
+    private ScanObservation describeClassicObservation(BluetoothDevice device, String discoveredName, int rssi) {
         if (device == null) {
             return null;
         }
 
         String address = device.getAddress();
         boolean bonded = hasConnectPermission() && device.getBondState() == BluetoothDevice.BOND_BONDED;
+        boolean remembered = isRememberedClassicAddress(address);
         String deviceName = hasConnectPermission() ? sanitize(device.getName()) : "";
         String resolvedName = resolveClassicName(device, discoveredName);
         boolean nameMatch = startsWithLumelo(resolvedName);
-        String preferredName = !resolvedName.isEmpty() ? resolvedName : "Classic Bluetooth device";
+        String preferredName = !resolvedName.isEmpty() ? resolvedName : "Classic Bluetooth candidate";
+        String selectionHint = classicSelectionHint(remembered, nameMatch, bonded);
+        String rssiLabel = formatRssi(rssi);
 
         StringBuilder listEntry = new StringBuilder();
+        if (remembered) {
+            listEntry.append("[LAST] ");
+        }
         if (bonded) {
             listEntry.append("[PAIRED] ");
         }
@@ -813,20 +964,29 @@ public class MainActivity extends Activity {
             listEntry.append("[CLASSIC] ");
         }
         listEntry.append(preferredName).append(" (").append(address).append(")");
+        if (!rssiLabel.isEmpty()) {
+            listEntry.append(" RSSI ").append(rssiLabel);
+        }
 
         StringBuilder detail = new StringBuilder();
         appendReportLine(detail, "Address", address);
+        appendReportLine(detail, "MAC Suffix", address.length() >= 5 ? address.substring(address.length() - 5) : address);
         appendReportLine(detail, "Discovered Name", discoveredName);
         appendReportLine(detail, "Device Name", deviceName);
         appendReportLine(detail, "Resolved Name", resolvedName);
+        appendReportLine(detail, "RSSI", rssiLabel);
         appendReportLine(detail, "Bond State", bonded ? "bonded" : "not bonded");
+        appendReportLine(detail, "Last Successful T4", remembered ? "yes" : "no");
         appendReportLine(detail, "Classic Match", nameMatch ? "yes" : "no");
+        appendReportLine(detail, "Selection Hint", selectionHint);
         appendReportLine(detail, "Source", "classic_scan");
         appendReportLine(detail, "Transport", "classic_bluetooth");
 
         String logLine = "Classic scan result " + address
                 + " bonded=" + (bonded ? "yes" : "no")
+                + " remembered=" + (remembered ? "yes" : "no")
                 + " nameMatch=" + (nameMatch ? "yes" : "no")
+                + (rssiLabel.isEmpty() ? "" : " rssi=" + rssiLabel)
                 + (resolvedName.isEmpty() ? "" : " name=" + resolvedName);
 
         return new ScanObservation(
@@ -834,7 +994,8 @@ public class MainActivity extends Activity {
                 false,
                 nameMatch,
                 bonded,
-                false,
+                remembered,
+                rssi,
                 listEntry.toString(),
                 detail.toString(),
                 logLine
@@ -869,10 +1030,13 @@ public class MainActivity extends Activity {
 
         StringBuilder detail = new StringBuilder();
         appendReportLine(detail, "Address", address);
+        appendReportLine(detail, "MAC Suffix", address.length() >= 5 ? address.substring(address.length() - 5) : address);
         appendReportLine(detail, "Remembered Name", preferredName);
         appendReportLine(detail, "Device Name", deviceName);
         appendReportLine(detail, "Bond State", bonded ? "bonded" : "not bonded");
+        appendReportLine(detail, "Last Successful T4", "yes");
         appendReportLine(detail, "Classic Match", "yes");
+        appendReportLine(detail, "Selection Hint", "This phone connected to this T4 successfully before.");
         appendReportLine(detail, "Source", "remembered_successful_device");
         appendReportLine(detail, "Transport", "classic_bluetooth");
 
@@ -886,6 +1050,7 @@ public class MainActivity extends Activity {
                 true,
                 bonded,
                 true,
+                RSSI_UNKNOWN,
                 listEntry.toString(),
                 detail.toString(),
                 logLine
@@ -955,6 +1120,7 @@ public class MainActivity extends Activity {
                 nameMatch,
                 false,
                 false,
+                result.getRssi(),
                 listEntry.toString(),
                 detail.toString(),
                 logLine
@@ -965,6 +1131,7 @@ public class MainActivity extends Activity {
         int uuidMatched = 0;
         int nameMatched = 0;
         int paired = 0;
+        int remembered = 0;
         for (ScanObservation observation : scanObservations) {
             if (observation.uuidMatch) {
                 uuidMatched++;
@@ -975,6 +1142,9 @@ public class MainActivity extends Activity {
             if (observation.bonded) {
                 paired++;
             }
+            if (observation.remembered) {
+                remembered++;
+            }
         }
         String modeLabel = activeScanMode == ScanMode.LUMELO
                 ? "Classic Bluetooth scan"
@@ -982,12 +1152,13 @@ public class MainActivity extends Activity {
         String selectedAddress = selectedDevice == null ? "none" : selectedDevice.getAddress();
         scanSummaryView.setText(String.format(
                 Locale.US,
-                "Scan summary: %s | devices=%d | uuidMatch=%d | nameMatch=%d | paired=%d | selected=%s",
+                "Scan summary: %s | devices=%d | uuidMatch=%d | nameMatch=%d | paired=%d | remembered=%d | selected=%s",
                 modeLabel,
                 scanObservations.size(),
                 uuidMatched,
                 nameMatched,
                 paired,
+                remembered,
                 selectedAddress
         ));
     }
@@ -996,6 +1167,16 @@ public class MainActivity extends Activity {
         int count = 0;
         for (ScanObservation observation : scanObservations) {
             if (observation.nameMatch) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int countRememberedCandidates() {
+        int count = 0;
+        for (ScanObservation observation : scanObservations) {
+            if (observation.remembered) {
                 count++;
             }
         }
@@ -1024,6 +1205,46 @@ public class MainActivity extends Activity {
 
     private String sanitize(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private boolean isRememberedClassicAddress(String address) {
+        if (address == null || address.isEmpty()) {
+            return false;
+        }
+        String rememberedAddress = prefs().getString(PREF_LAST_CLASSIC_ADDRESS, "");
+        return rememberedAddress != null && rememberedAddress.equalsIgnoreCase(address);
+    }
+
+    private int knownRssiFor(String address) {
+        if (address == null || address.isEmpty()) {
+            return RSSI_UNKNOWN;
+        }
+        for (ScanObservation observation : scanObservations) {
+            if (address.equalsIgnoreCase(observation.address) && observation.rssi != RSSI_UNKNOWN) {
+                return observation.rssi;
+            }
+        }
+        return RSSI_UNKNOWN;
+    }
+
+    private String classicSelectionHint(boolean remembered, boolean nameMatch, boolean bonded) {
+        if (remembered) {
+            return "This phone connected to this T4 successfully before.";
+        }
+        if (nameMatch) {
+            return "Device name looks like Lumelo / NanoPC-T4.";
+        }
+        if (bonded) {
+            return "Paired classic candidate. If unsure, compare the MAC suffix.";
+        }
+        return "Anonymous classic candidate. Compare the MAC suffix or retry scan.";
+    }
+
+    private String formatRssi(int rssi) {
+        if (rssi == RSSI_UNKNOWN) {
+            return "";
+        }
+        return String.valueOf(rssi);
     }
 
     @SuppressLint("MissingPermission")
@@ -1117,7 +1338,9 @@ public class MainActivity extends Activity {
         if (gatt != null) {
             closeGattQuietly(true);
         }
+        cancelClassicFailureProbe();
         stopStatusPolling();
+        clearConnectivityDiagnostics();
         resetProvisioningSession();
         connectionMode = activeScanMode == ScanMode.GENERIC_TEST
                 ? ConnectionMode.GENERIC_TEST
@@ -1135,15 +1358,14 @@ public class MainActivity extends Activity {
             }
             if (classicTransport != null) {
                 classicTransport.connect(selectedDevice);
-                runOnUiThread(() -> disconnectButton.setEnabled(true));
+                runOnUiThread(() -> {
+                    disconnectButton.setEnabled(true);
+                    refreshConnectButtonState();
+                });
             }
             return;
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            gatt = selectedDevice.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
-        } else {
-            gatt = selectedDevice.connectGatt(this, false, gattCallback);
-        }
+        gatt = selectedDevice.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
         runOnUiThread(() -> disconnectButton.setEnabled(gatt != null));
     }
 
@@ -1267,7 +1489,7 @@ public class MainActivity extends Activity {
                     + describeGattStatus(status));
             if (DEVICE_INFO_UUID.equals(characteristic.getUuid())) {
                 String text = new String(characteristic.getValue(), StandardCharsets.UTF_8);
-                runOnUiThread(() -> deviceInfoView.setText("Device info: " + text));
+                runOnUiThread(() -> deviceInfoView.setText(formatDeviceInfoText(text)));
                 logEvent("Device info payload: " + text);
                 enableStatusNotifications(bluetoothGatt);
             }
@@ -1289,7 +1511,7 @@ public class MainActivity extends Activity {
                     + describeGattStatus(status));
             if (DEVICE_INFO_UUID.equals(characteristic.getUuid())) {
                 String text = new String(value, StandardCharsets.UTF_8);
-                runOnUiThread(() -> deviceInfoView.setText("Device info: " + text));
+                runOnUiThread(() -> deviceInfoView.setText(formatDeviceInfoText(text)));
                 logEvent("Device info payload: " + text);
                 enableStatusNotifications(bluetoothGatt);
             }
@@ -1391,7 +1613,7 @@ public class MainActivity extends Activity {
     private void requestStatusRead() {
         if (connectionMode == ConnectionMode.LUMELO) {
             if (classicTransport == null || !classicTransport.isConnected()) {
-                setStatus("Connect to Lumelo T4 before reading status.");
+                setStatus(withRememberedWebUiHint("Connect to Lumelo T4 before reading status."));
                 logEvent("Status read blocked: classic Bluetooth session unavailable");
                 return;
             }
@@ -1423,14 +1645,20 @@ public class MainActivity extends Activity {
     private void sendWifiCredentials() {
         String ssid = ssidInput.getText().toString().trim();
         String password = passwordInput.getText().toString();
+        String passwordKind = describePasswordType(password);
         if (ssid.isEmpty()) {
             setStatus("SSID is required.");
             logEvent("Cannot send credentials: empty SSID");
             return;
         }
-        if (password.length() < 8 || password.length() > 63) {
-            setStatus("WPA password must be 8..63 characters.");
+        if (!isValidWpaPassword(password)) {
+            setStatus("WPA password must be 8..63 characters, or 64 hexadecimal digits.");
             logEvent("Cannot send credentials: password length invalid");
+            return;
+        }
+        if (passwordEnteredForDifferentSsid(ssid, password)) {
+            setStatus("SSID changed after password entry. Re-check the Wi-Fi password before sending.");
+            logEvent("Cannot send credentials: password was entered for a different SSID");
             return;
         }
         if (connectionMode == ConnectionMode.LUMELO) {
@@ -1441,8 +1669,12 @@ public class MainActivity extends Activity {
             }
             classicTransport.sendCredentials(ssid, password);
             startStatusPolling();
-            setStatus("Sent credentials. Waiting for T4 status...");
-            logEvent("Queued Wi-Fi credentials for SSID " + ssid + " over classic Bluetooth");
+            setStatus("Sent " + passwordKind + " credentials for SSID " + ssid + ". Waiting for T4 status...");
+            logEvent("Queued " + passwordKind + " credentials for SSID "
+                    + ssid
+                    + " over classic Bluetooth (password length="
+                    + password.length()
+                    + ")");
             return;
         }
         if (gatt == null || wifiCredentialsCharacteristic == null || applyCharacteristic == null) {
@@ -1467,8 +1699,12 @@ public class MainActivity extends Activity {
         enqueueWrite(wifiCredentialsCharacteristic, payloadBytes);
         enqueueWrite(applyCharacteristic, "{}".getBytes(StandardCharsets.UTF_8));
         startStatusPolling();
-        setStatus("Sent credentials. Waiting for T4 status...");
-        logEvent("Queued Wi-Fi credentials for SSID " + ssid);
+        setStatus("Sent " + passwordKind + " credentials for SSID " + ssid + ". Waiting for T4 status...");
+        logEvent("Queued " + passwordKind + " credentials for SSID "
+                + ssid
+                + " over BLE (password length="
+                + password.length()
+                + ")");
     }
 
     private void enqueueWrite(BluetoothGattCharacteristic characteristic, byte[] value) {
@@ -1509,9 +1745,10 @@ public class MainActivity extends Activity {
 
     private boolean hasScanPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
+            return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+                    && hasLocationPermission();
         }
-        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        return hasLocationPermission();
     }
 
     private boolean hasConnectPermission() {
@@ -1519,6 +1756,11 @@ public class MainActivity extends Activity {
             return checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
         }
         return true;
+    }
+
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
     @SuppressLint("MissingPermission")
@@ -1573,6 +1815,8 @@ public class MainActivity extends Activity {
         String message = extractJsonString(text, "message");
         String ssid = extractJsonString(text, "ssid");
         String ip = extractJsonString(text, "ip");
+        String wifiIp = extractJsonString(text, "wifi_ip");
+        String wiredIp = extractJsonString(text, "wired_ip");
         String wifiInterface = extractJsonString(text, "wifi_interface");
         String errorCode = extractJsonString(text, "error_code");
         String applyOutput = extractJsonString(text, "apply_output");
@@ -1580,20 +1824,24 @@ public class MainActivity extends Activity {
         String wpaUnit = extractJsonString(text, "wpa_unit");
         int ipWaitSeconds = extractJsonInt(text, "ip_wait_seconds");
         runOnUiThread(() -> {
-            webUrl = extractJsonString(text, "web_url");
-            if ((webUrl == null || webUrl.isEmpty()) && ip != null && !ip.isEmpty()) {
-                webUrl = "http://" + ip + ":18080/";
+            String candidateWebUrl = deriveWebUiUrl(
+                    extractJsonString(text, "web_url"),
+                    ip,
+                    wifiIp,
+                    wiredIp,
+                    extractJsonInt(text, "web_port")
+            );
+            if (ssid != null && !ssid.isEmpty()) {
+                persistT4Ssid(ssid);
             }
-            if (webUrl != null && !webUrl.isEmpty()) {
-                persistWebUiUrl(webUrl);
-            }
+            rememberReportedWebUiUrl(candidateWebUrl);
             resultView.setText(formatResultText(
                     state,
                     message,
                     ssid,
                     ip,
-                    extractJsonString(text, "wifi_ip"),
-                    extractJsonString(text, "wired_ip"),
+                    wifiIp,
+                    wiredIp,
                     wifiInterface,
                     errorCode,
                     applyOutput,
@@ -1602,8 +1850,7 @@ public class MainActivity extends Activity {
                     ipWaitSeconds,
                     text
             ));
-            boolean hasWebUrl = webUrl != null && !webUrl.isEmpty();
-            setWebButtonsEnabled(hasWebUrl);
+            setWebButtonsEnabled(webUrl != null && !webUrl.isEmpty());
         });
         boolean openedMainInterface = maybeOpenMainInterface(state);
         if ("connected".equals(state) || "failed".equals(state)) {
@@ -1631,6 +1878,7 @@ public class MainActivity extends Activity {
     }
 
     private void setStatus(String text) {
+        lastStatusText = text == null ? "" : text;
         runOnUiThread(() -> statusView.setText(text));
         logEvent("Status: " + text);
     }
@@ -1658,6 +1906,8 @@ public class MainActivity extends Activity {
         String sessionState;
         if (classicTransport != null && classicTransport.isConnected()) {
             sessionState = "classic_connected";
+        } else if (classicTransport != null && classicTransport.isConnectInProgress()) {
+            sessionState = "classic_connecting";
         } else if (statusCharacteristic != null) {
             sessionState = "gatt_ready";
         } else if (gatt != null) {
@@ -1666,21 +1916,45 @@ public class MainActivity extends Activity {
             sessionState = "idle";
         }
 
+        String phoneWifi = currentConnectedWifiSsid();
+        if (phoneWifi.isEmpty()) {
+            phoneWifi = "(unknown)";
+        }
+        String lastT4Wifi = rememberedT4Ssid();
+        if (lastT4Wifi.isEmpty()) {
+            lastT4Wifi = "(unknown)";
+        }
+
         return String.format(
                 Locale.US,
-                "Environment: %s, scanPerm=%s, connectPerm=%s, session=%s, mtu=%d, sdk=%d",
+                "Environment: %s, scanPerm=%s, connectPerm=%s, session=%s, mtu=%d, sdk=%d, phoneWiFi=%s, lastT4WiFi=%s",
                 adapterState,
                 hasScanPermission() ? "granted" : "missing",
                 hasConnectPermission() ? "granted" : "missing",
                 sessionState,
                 negotiatedMtu,
-                Build.VERSION.SDK_INT
+                Build.VERSION.SDK_INT,
+                phoneWifi,
+                lastT4Wifi
         );
+    }
+
+    private String buildClassicSessionSummary() {
+        if (classicTransport == null) {
+            return "Classic session: unavailable";
+        }
+        return "Classic session: " + classicTransport.debugSummary();
     }
 
     private void refreshEnvironmentStatus() {
         String summary = buildEnvironmentSummary();
-        runOnUiThread(() -> environmentView.setText(summary));
+        String classicSummary = buildClassicSessionSummary();
+        runOnUiThread(() -> {
+            environmentView.setText(summary);
+            if (classicSessionView != null) {
+                classicSessionView.setText(classicSummary);
+            }
+        });
     }
 
     private void logEvent(String line) {
@@ -1740,12 +2014,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void copyDiagnosticSummary() {
+        ClipboardManager clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboardManager == null) {
+            setStatus("Clipboard service unavailable on this phone.");
+            logEvent("Clipboard service unavailable");
+            return;
+        }
+        String summary = buildQuickDiagnosticSummary();
+        clipboardManager.setPrimaryClip(ClipData.newPlainText("Lumelo diagnostic summary", summary));
+        runOnUiThread(() -> Toast.makeText(
+                MainActivity.this,
+                "Copied diagnostic summary",
+                Toast.LENGTH_SHORT
+        ).show());
+        logEvent("Copied current diagnostic summary to clipboard");
+    }
+
     private String buildDiagnosticReport() {
         StringBuilder builder = new StringBuilder();
+        builder.append(buildQuickDiagnosticSummary()).append("\n\n");
         builder.append("Lumelo Setup Diagnostic\n");
         appendReportLine(builder, "Build", buildBuildInfoText());
         appendReportLine(builder, "Status", statusView.getText().toString());
         appendReportLine(builder, "Environment", buildEnvironmentSummary());
+        appendReportLine(builder, "Classic Session", buildClassicSessionSummary());
+        appendReportLine(builder, "Credential Form", buildCredentialFormSummary());
         appendReportLine(builder, "Selected", selectedView.getText().toString());
         appendReportLine(builder, "Device Info", deviceInfoView.getText().toString());
         appendReportLine(builder, "Result", resultView.getText().toString());
@@ -1771,6 +2065,27 @@ public class MainActivity extends Activity {
         return builder.toString();
     }
 
+    private String buildQuickDiagnosticSummary() {
+        StringBuilder builder = new StringBuilder();
+        builder.append("Lumelo Setup Quick Summary\n");
+        appendReportLine(builder, "Build", buildBuildInfoText());
+        appendReportLine(builder, "Status", sanitize(lastStatusText));
+        appendReportLine(builder, "Selected", sanitize(selectedView == null ? "" : selectedView.getText().toString()));
+        appendReportLine(builder, "Phone Wi-Fi", currentConnectedWifiSsid());
+        Ipv4Network.AddressInfo phoneInfo = Ipv4Network.currentAddressInfo(
+                getSystemService(ConnectivityManager.class)
+        );
+        if (phoneInfo != null) {
+            appendReportLine(builder, "Phone IPv4", phoneInfo.address + "/" + phoneInfo.prefixLength);
+        }
+        appendReportLine(builder, "Last known T4 Wi-Fi", rememberedT4Ssid());
+        appendReportLine(builder, "Last known WebUI", currentKnownWebUiUrl());
+        appendReportLine(builder, "WebUI probe", sanitize(lastWebUiProbeSummary));
+        appendReportLine(builder, "Subnet scan", sanitize(lastSubnetScanSummary));
+        appendReportLine(builder, "Classic Session", buildClassicSessionSummary());
+        return builder.toString();
+    }
+
     private void appendReportLine(StringBuilder builder, String label, String value) {
         if (value == null || value.isEmpty()) {
             return;
@@ -1788,6 +2103,87 @@ public class MainActivity extends Activity {
         ssidInput.setText(currentSsid);
         setStatus("Filled SSID from current Wi-Fi.");
         logEvent("Filled SSID from current Wi-Fi: " + currentSsid);
+    }
+
+    private TextWatcher simpleTextWatcher(Runnable afterChanged) {
+        return new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable editable) {
+                afterChanged.run();
+            }
+        };
+    }
+
+    private void refreshCredentialFormSummary() {
+        if (credentialFormView == null) {
+            return;
+        }
+        runOnUiThread(() -> credentialFormView.setText(buildCredentialFormSummary()));
+    }
+
+    private String buildCredentialFormSummary() {
+        String ssid = sanitize(ssidInput == null ? "" : ssidInput.getText().toString());
+        String password = passwordInput == null ? "" : passwordInput.getText().toString();
+        String phoneWifi = currentConnectedWifiSsid();
+        String lastT4Wifi = rememberedT4Ssid();
+
+        StringBuilder builder = new StringBuilder("Credential form:");
+        appendInlineSummary(builder, "Target SSID", ssid.isEmpty() ? "(empty)" : ssid);
+        appendInlineSummary(builder, "Password length", String.valueOf(password.length()));
+        appendInlineSummary(builder, "Password type", describePasswordType(password));
+        appendInlineSummary(builder, "Phone Wi-Fi", phoneWifi.isEmpty() ? "(unknown)" : phoneWifi);
+        if (!lastT4Wifi.isEmpty()) {
+            appendInlineSummary(builder, "Last T4 Wi-Fi", lastT4Wifi);
+        }
+        if (passwordEnteredForDifferentSsid(ssid, password)) {
+            appendInlineSummary(builder, "Warning", "SSID changed after password entry; re-check before sending");
+        } else if (!ssid.isEmpty() && !phoneWifi.isEmpty() && !ssid.equals(phoneWifi)) {
+            appendInlineSummary(builder, "Note", "phone is not currently on the target SSID");
+        }
+        return builder.toString();
+    }
+
+    private void appendInlineSummary(StringBuilder builder, String label, String value) {
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        builder.append("\n").append(label).append(": ").append(value);
+    }
+
+    private boolean passwordEnteredForDifferentSsid(String currentSsid, String password) {
+        if (password == null || password.isEmpty()) {
+            return false;
+        }
+        String normalizedCurrent = sanitize(currentSsid);
+        String editedFor = sanitize(passwordEditedForSsid);
+        if (normalizedCurrent.isEmpty() || editedFor.isEmpty()) {
+            return false;
+        }
+        return !normalizedCurrent.equals(editedFor);
+    }
+
+    private String describePasswordType(String password) {
+        if (password == null || password.isEmpty()) {
+            return "(empty)";
+        }
+        if (password.length() == 64 && isHex(password)) {
+            return "64-char hex PSK";
+        }
+        if (password.length() < 8) {
+            return "too short";
+        }
+        if (password.length() > 63) {
+            return "too long";
+        }
+        return "WPA passphrase";
     }
 
     private TextView label(String text) {
@@ -1889,6 +2285,63 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String formatDeviceInfoText(String payload) {
+        String name = extractJsonString(payload, "name");
+        String hostname = extractJsonString(payload, "hostname");
+        String ip = extractJsonString(payload, "ip");
+        String wifiIp = extractJsonString(payload, "wifi_ip");
+        String wiredIp = extractJsonString(payload, "wired_ip");
+        String wifiInterface = extractJsonString(payload, "wifi_interface");
+        String transport = extractJsonString(payload, "transport");
+        String statusPath = extractJsonString(payload, "status_path");
+        int webPort = extractJsonInt(payload, "web_port");
+
+        StringBuilder builder = new StringBuilder("Device info:");
+        appendResultLine(builder, "Name", name);
+        appendResultLine(builder, "Hostname", hostname);
+        appendResultLine(builder, "IP", ip);
+        appendResultLine(builder, "Wi-Fi IP", wifiIp);
+        appendResultLine(builder, "Wired IP", wiredIp);
+        appendResultLine(builder, "Wi-Fi interface", wifiInterface);
+        appendResultLine(builder, "Transport", transport);
+        appendResultLine(builder, "Status path", statusPath);
+        if (webPort > 0) {
+            appendResultLine(builder, "Web port", String.valueOf(webPort));
+        }
+        appendResultLine(builder, "Raw", payload);
+        return builder.toString();
+    }
+
+    private String deriveWebUiUrl(
+            String reportedWebUrl,
+            String ip,
+            String wifiIp,
+            String wiredIp,
+            int webPort
+    ) {
+        String normalizedUrl = sanitize(reportedWebUrl);
+        if (!normalizedUrl.isEmpty()) {
+            return normalizedUrl;
+        }
+
+        String reachableIp = sanitize(ip);
+        if (reachableIp.isEmpty()) {
+            reachableIp = sanitize(wifiIp);
+        }
+        if (reachableIp.isEmpty()) {
+            reachableIp = sanitize(wiredIp);
+        }
+        if (reachableIp.isEmpty()) {
+            return "";
+        }
+
+        int resolvedPort = webPort > 0 ? webPort : 80;
+        if (resolvedPort == 80) {
+            return "http://" + reachableIp + "/";
+        }
+        return "http://" + reachableIp + ":" + resolvedPort + "/";
+    }
+
     private String formatResultText(
             String state,
             String message,
@@ -1946,14 +2399,15 @@ public class MainActivity extends Activity {
     @SuppressLint("MissingPermission")
     private void disconnectFromDevice() {
         if (connectionMode == ConnectionMode.LUMELO) {
-            if (classicTransport == null || !classicTransport.isConnected()) {
+            if (classicTransport == null
+                    || (!classicTransport.isConnected() && !classicTransport.isConnectInProgress())) {
                 setStatus("No active classic Bluetooth connection to disconnect.");
                 return;
             }
             stopStatusPolling();
             classicTransport.disconnect();
             resetProvisioningSession();
-            setStatus("Disconnected from T4.");
+            setStatus(withRememberedWebUiHint("Disconnected from T4."));
             logEvent("Disconnected from T4");
             return;
         }
@@ -1966,7 +2420,7 @@ public class MainActivity extends Activity {
         closeGattQuietly(true);
         resetProvisioningSession();
         setStatus(disconnectedMode == ConnectionMode.LUMELO
-                ? "Disconnected from T4."
+                ? withRememberedWebUiHint("Disconnected from T4.")
                 : "Disconnected from raw BLE device.");
         logEvent(disconnectedMode == ConnectionMode.LUMELO
                 ? "Disconnected from T4"
@@ -1983,24 +2437,37 @@ public class MainActivity extends Activity {
         if (requestDisconnect && hasConnectPermission()) {
             currentGatt.disconnect();
         }
-        currentGatt.close();
+        try {
+            currentGatt.close();
+        } catch (SecurityException exception) {
+            logEvent("Cannot close GATT session: " + exception.getClass().getSimpleName());
+        }
     }
 
     private void finishGattSession(BluetoothGatt bluetoothGatt) {
         if (gatt == bluetoothGatt) {
             gatt = null;
         }
-        bluetoothGatt.close();
+        if (hasConnectPermission()) {
+            try {
+                bluetoothGatt.close();
+            } catch (SecurityException exception) {
+                logEvent("Cannot close finished GATT session: " + exception.getClass().getSimpleName());
+            }
+        } else {
+            logEvent("Cannot close GATT session: missing Bluetooth connect permission");
+        }
         resetProvisioningSession();
     }
 
     private void resetProvisioningSession() {
+        cancelClassicFailureProbe();
         stopStatusPolling();
         deviceInfoCharacteristic = null;
         wifiCredentialsCharacteristic = null;
         applyCharacteristic = null;
         statusCharacteristic = null;
-        webUrl = null;
+        webUrl = rememberedWebUiUrl();
         mainInterfaceOpenedForSession = false;
         writeQueue.clear();
         writeInFlight = false;
@@ -2013,7 +2480,10 @@ public class MainActivity extends Activity {
             disconnectButton.setEnabled(false);
             setWebButtonsEnabled(webUrl != null && !webUrl.isEmpty());
             deviceInfoView.setText("Device info: not connected");
-            resultView.setText("Result: waiting");
+            resultView.setText(webUrl != null && !webUrl.isEmpty()
+                    ? buildRememberedWebUiText(webUrl)
+                    : "Result: waiting");
+            refreshConnectButtonState();
         });
     }
 
@@ -2038,6 +2508,10 @@ public class MainActivity extends Activity {
         persistWebUiUrl(url);
         Intent intent = new Intent(this, MainInterfaceActivity.class);
         intent.putExtra(MainInterfaceActivity.EXTRA_INITIAL_URL, url);
+        String rememberedSsid = rememberedT4Ssid();
+        if (!rememberedSsid.isEmpty()) {
+            intent.putExtra(MainInterfaceActivity.EXTRA_EXPECTED_T4_SSID, rememberedSsid);
+        }
         startActivity(intent);
     }
 
@@ -2048,11 +2522,33 @@ public class MainActivity extends Activity {
         openHealthzButton.setEnabled(enabled);
     }
 
+    private void rememberReportedWebUiUrl(String candidateUrl) {
+        String normalized = sanitize(candidateUrl);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        webUrl = normalized;
+        persistWebUiUrl(normalized);
+        runOnUiThread(() -> setWebButtonsEnabled(true));
+    }
+
     private void persistWebUiUrl(String url) {
         if (url == null || url.isEmpty()) {
             return;
         }
-        prefs().edit().putString(PREF_LAST_WEB_URL, url).commit();
+        prefs().edit().putString(PREF_LAST_WEB_URL, url).apply();
+    }
+
+    private void persistT4Ssid(String ssid) {
+        String normalized = sanitize(ssid);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        prefs().edit().putString(PREF_LAST_T4_SSID, normalized).apply();
+    }
+
+    private String rememberedT4Ssid() {
+        return sanitize(prefs().getString(PREF_LAST_T4_SSID, ""));
     }
 
     @SuppressLint("MissingPermission")
@@ -2074,7 +2570,7 @@ public class MainActivity extends Activity {
         prefs().edit()
                 .putString(PREF_LAST_CLASSIC_ADDRESS, address)
                 .putString(PREF_LAST_CLASSIC_NAME, effectiveName)
-                .commit();
+                .apply();
     }
 
     private String rememberedClassicName(String address) {
@@ -2093,7 +2589,7 @@ public class MainActivity extends Activity {
             setWebButtonsEnabled(true);
             return;
         }
-        String rememberedUrl = prefs().getString(PREF_LAST_WEB_URL, "");
+        String rememberedUrl = rememberedWebUiUrl();
         if (rememberedUrl == null || rememberedUrl.isEmpty()) {
             return;
         }
@@ -2101,12 +2597,300 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             setWebButtonsEnabled(true);
             if (!disconnectButton.isEnabled()) {
-                resultView.setText(
-                        "Result:\nLast known WebUI: " + rememberedUrl
-                                + "\nTip: if phone and T4 are on the same network, you can open it directly."
-                );
+                resultView.setText(buildRememberedWebUiText(rememberedUrl));
             }
         });
+    }
+
+    private String rememberedWebUiUrl() {
+        return sanitize(prefs().getString(PREF_LAST_WEB_URL, ""));
+    }
+
+    private String currentKnownWebUiUrl() {
+        String current = sanitize(webUrl);
+        if (!current.isEmpty()) {
+            return current;
+        }
+        return rememberedWebUiUrl();
+    }
+
+    private String buildRememberedWebUiText(String rememberedUrl) {
+        String rememberedSsid = rememberedT4Ssid();
+        return "Result:\nLast known WebUI: " + rememberedUrl
+                + (rememberedSsid.isEmpty()
+                ? ""
+                : "\nLast known T4 Wi-Fi: " + rememberedSsid)
+                + "\nTip: if phone and T4 are on the same network, you can open it directly.";
+    }
+
+    private String withRememberedWebUiHint(String message) {
+        String rememberedUrl = webUrl;
+        if (rememberedUrl == null || rememberedUrl.isEmpty()) {
+            rememberedUrl = rememberedWebUiUrl();
+        }
+        if (rememberedUrl == null || rememberedUrl.isEmpty()) {
+            return message;
+        }
+        return message + " Last known WebUI: " + rememberedUrl;
+    }
+
+    private String withClassicConnectRecoveryHint(String message) {
+        String status = withRememberedWebUiHint(message);
+        if (message == null) {
+            return status;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        if (!normalized.startsWith("classic bluetooth connect failed")) {
+            return status;
+        }
+        if (status.contains("Try OPEN WEBUI")) {
+            return status;
+        }
+        String rememberedUrl = webUrl;
+        if (rememberedUrl == null || rememberedUrl.isEmpty()) {
+            rememberedUrl = rememberedWebUiUrl();
+        }
+        if (rememberedUrl != null && !rememberedUrl.isEmpty()) {
+            return status + " Try OPEN WEBUI if phone and T4 are still on the same network.";
+        }
+        return status + " Scan still sees Lumelo, so check whether the T4 classic provisioning service is up.";
+    }
+
+    private synchronized long cancelClassicFailureProbe() {
+        classicFailureProbeSerial += 1;
+        return classicFailureProbeSerial;
+    }
+
+    private boolean isClassicConnectFailureMessage(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.startsWith("classic bluetooth connect failed")
+                || normalized.startsWith("classic bluetooth stream setup failed");
+    }
+
+    private void refreshClassicConnectFailureUi() {
+        String rememberedUrl = webUrl;
+        if (rememberedUrl == null || rememberedUrl.isEmpty()) {
+            rememberedUrl = rememberedWebUiUrl();
+        }
+        final String probeUrl = rememberedUrl;
+        final boolean enableWebButtons = rememberedUrl != null && !rememberedUrl.isEmpty();
+        final long probeSerial = cancelClassicFailureProbe();
+        runOnUiThread(() -> {
+            sendButton.setEnabled(false);
+            readStatusButton.setEnabled(false);
+            disconnectButton.setEnabled(false);
+            setWebButtonsEnabled(enableWebButtons);
+            deviceInfoView.setText("Device info: not connected");
+            refreshConnectButtonState();
+        });
+        if (probeUrl != null && !probeUrl.isEmpty()) {
+            probeRememberedWebUiAsync(probeUrl, probeSerial);
+        }
+    }
+
+    private void clearConnectivityDiagnostics() {
+        lastWebUiProbeSummary = "";
+        lastSubnetScanSummary = "";
+    }
+
+    private void probeRememberedWebUiAsync(String baseUrl, long probeSerial) {
+        String healthzUrl = normalizeHealthzUrl(baseUrl);
+        String rememberedHost = extractHost(baseUrl);
+        new Thread(() -> {
+            boolean reachable = isHttpReachable(healthzUrl);
+            synchronized (this) {
+                if (probeSerial != classicFailureProbeSerial) {
+                    return;
+                }
+            }
+            String currentStatus = lastStatusText;
+            if (!isClassicConnectFailureMessage(currentStatus)) {
+                return;
+            }
+            if (reachable) {
+                lastWebUiProbeSummary = "last known WebUI reachable from phone";
+                if (!currentStatus.contains("OPEN WEBUI")) {
+                    setStatus(currentStatus + " Last known WebUI still responds from this phone.");
+                }
+                return;
+            }
+            lastWebUiProbeSummary = "last known WebUI unreachable from phone";
+            if (!currentStatus.contains("Last known WebUI is unreachable")) {
+                setStatus(currentStatus + " Last known WebUI is unreachable from this phone right now, so T4 may have lost Wi-Fi or changed IP.");
+            }
+            Ipv4Network.AddressInfo phoneInfo = Ipv4Network.currentAddressInfo(
+                    getSystemService(ConnectivityManager.class)
+            );
+            if (phoneInfo != null && phoneInfo.prefixLength == 24) {
+                scanCurrentSubnetForLumeloWebUiAsync(phoneInfo, rememberedHost, probeSerial);
+            } else {
+                lastSubnetScanSummary = "skipped current-subnet scan (phone IPv4 is not /24)";
+            }
+        }, "LumeloWebUiProbe").start();
+    }
+
+    private void scanCurrentSubnetForLumeloWebUiAsync(
+            Ipv4Network.AddressInfo phoneInfo,
+            String rememberedHost,
+            long probeSerial
+    ) {
+        String subnetPrefix = subnet24Prefix(phoneInfo.address);
+        if (subnetPrefix.isEmpty()) {
+            lastSubnetScanSummary = "skipped current-subnet scan (phone IPv4 subnet unavailable)";
+            return;
+        }
+        lastSubnetScanSummary = "scanning current /24 subnet for another Lumelo WebUI";
+        if (!lastStatusText.contains("Scanning current /24 subnet")) {
+            setStatus(lastStatusText + " Scanning current /24 subnet for another Lumelo WebUI...");
+        }
+        new Thread(() -> {
+            ExecutorService executor = Executors.newFixedThreadPool(WEBUI_SUBNET_SCAN_WORKERS);
+            ExecutorCompletionService<String> completion = new ExecutorCompletionService<>(executor);
+            int taskCount = 0;
+            try {
+                for (int host = 1; host <= 254; host++) {
+                    String candidateHost = subnetPrefix + "." + host;
+                    if (candidateHost.equals(phoneInfo.address) || candidateHost.equals(rememberedHost)) {
+                        continue;
+                    }
+                    completion.submit(() -> probeLumeloHealthzHost(candidateHost) ? candidateHost : null);
+                    taskCount += 1;
+                }
+                String foundHost = null;
+                for (int index = 0; index < taskCount; index++) {
+                    Future<String> result = completion.take();
+                    synchronized (this) {
+                        if (probeSerial != classicFailureProbeSerial) {
+                            executor.shutdownNow();
+                            return;
+                        }
+                    }
+                    String candidate = result.get();
+                    if (candidate != null) {
+                        foundHost = candidate;
+                        break;
+                    }
+                }
+                executor.shutdownNow();
+                synchronized (this) {
+                    if (probeSerial != classicFailureProbeSerial) {
+                        return;
+                    }
+                }
+                if (foundHost == null) {
+                    lastSubnetScanSummary = "no Lumelo WebUI responded on current /24 subnet";
+                    if (!lastStatusText.contains("No Lumelo WebUI responded on the current /24 subnet")) {
+                        setStatus(lastStatusText + " No Lumelo WebUI responded on the current /24 subnet.");
+                    }
+                    return;
+                }
+                String foundUrl = "http://" + foundHost + "/";
+                lastSubnetScanSummary = "found Lumelo WebUI at " + foundUrl;
+                rememberReportedWebUiUrl(foundUrl);
+                if (!lastStatusText.contains(foundUrl)) {
+                    setStatus(lastStatusText + " Found Lumelo WebUI at " + foundUrl + " You can OPEN WEBUI now.");
+                }
+            } catch (Exception exception) {
+                executor.shutdownNow();
+                if (exception instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                synchronized (this) {
+                    if (probeSerial != classicFailureProbeSerial) {
+                        return;
+                    }
+                }
+                lastSubnetScanSummary = "current-subnet scan failed: " + exception.getClass().getSimpleName();
+                logEvent("Current-subnet scan failed: " + exception.getClass().getSimpleName());
+                if (!lastStatusText.contains("Current-subnet scan failed")) {
+                    setStatus(lastStatusText + " Current-subnet scan failed: " + exception.getClass().getSimpleName() + ".");
+                }
+            }
+        }, "LumeloSubnetScan").start();
+    }
+
+    private String subnet24Prefix(String address) {
+        if (address == null || address.isEmpty()) {
+            return "";
+        }
+        String[] parts = address.split("\\.");
+        if (parts.length != 4) {
+            return "";
+        }
+        return parts[0] + "." + parts[1] + "." + parts[2];
+    }
+
+    private boolean probeLumeloHealthzHost(String host) {
+        String url = "http://" + host + "/healthz";
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(WEBUI_SUBNET_SCAN_TIMEOUT_MS);
+            connection.setReadTimeout(WEBUI_SUBNET_SCAN_TIMEOUT_MS);
+            connection.setUseCaches(false);
+            connection.connect();
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                return false;
+            }
+            String body = readResponseBody(connection);
+            return body.contains("\"status\":\"ok\"")
+                    && body.contains("\"mode\":\"local\"")
+                    && body.contains("\"provisioning_available\":true");
+        } catch (IOException exception) {
+            return false;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private String readResponseBody(HttpURLConnection connection) throws IOException {
+        InputStream stream = connection.getInputStream();
+        try (InputStream input = stream; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return output.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    private String normalizeHealthzUrl(String baseUrl) {
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            return "";
+        }
+        String normalized = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        if (normalized.endsWith("/healthz")) {
+            return normalized;
+        }
+        return normalized + "/healthz";
+    }
+
+    private boolean isHttpReachable(String url) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(WEBUI_PROBE_TIMEOUT_MS);
+            connection.setReadTimeout(WEBUI_PROBE_TIMEOUT_MS);
+            connection.setUseCaches(false);
+            connection.connect();
+            int code = connection.getResponseCode();
+            return code >= 200 && code < 500;
+        } catch (IOException exception) {
+            return false;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
     }
 
     private SharedPreferences prefs() {
@@ -2118,50 +2902,28 @@ public class MainActivity extends Activity {
         if (targetHost.isEmpty() || !isPrivateIpv4(targetHost)) {
             return true;
         }
-        String phoneIp = currentIpv4Address();
-        if (phoneIp.isEmpty()) {
+        Ipv4Network.AddressInfo phoneInfo = Ipv4Network.currentAddressInfo(
+                getSystemService(ConnectivityManager.class)
+        );
+        if (phoneInfo == null) {
             return false;
         }
-        return sameSubnet(phoneIp, targetHost);
+        return Ipv4Network.sameSubnet(phoneInfo, targetHost);
     }
 
     private String crossNetworkHint() {
         String targetHost = extractHost(webUrl);
-        String phoneIp = currentIpv4Address();
-        if (targetHost.isEmpty() || phoneIp.isEmpty()) {
+        Ipv4Network.AddressInfo phoneInfo = Ipv4Network.currentAddressInfo(
+                getSystemService(ConnectivityManager.class)
+        );
+        if (targetHost.isEmpty() || phoneInfo == null) {
             return "";
         }
-        if (!isPrivateIpv4(targetHost) || sameSubnet(phoneIp, targetHost)) {
+        if (!isPrivateIpv4(targetHost) || Ipv4Network.sameSubnet(phoneInfo, targetHost)) {
             return "";
         }
-        return "Phone IP " + phoneIp + " is not on the same local subnet as T4 " + targetHost
+        return "Phone IP " + phoneInfo.address + " is not on the same local subnet as T4 " + targetHost
                 + ". Connect this phone to the same hotspot or router before opening WebUI.";
-    }
-
-    private String currentIpv4Address() {
-        ConnectivityManager manager = getSystemService(ConnectivityManager.class);
-        if (manager == null) {
-            return "";
-        }
-        Network activeNetwork = manager.getActiveNetwork();
-        if (activeNetwork == null) {
-            return "";
-        }
-        LinkProperties properties = manager.getLinkProperties(activeNetwork);
-        if (properties == null) {
-            return "";
-        }
-        List<LinkAddress> addresses = properties.getLinkAddresses();
-        if (addresses == null) {
-            return "";
-        }
-        for (LinkAddress address : addresses) {
-            InetAddress inetAddress = address.getAddress();
-            if (inetAddress instanceof Inet4Address && !inetAddress.isLoopbackAddress()) {
-                return inetAddress.getHostAddress();
-            }
-        }
-        return "";
     }
 
     private String extractHost(String url) {
@@ -2182,36 +2944,27 @@ public class MainActivity extends Activity {
     }
 
     private boolean isPrivateIpv4(String ip) {
-        if (ip.startsWith("10.")) {
-            return true;
-        }
-        if (ip.startsWith("192.168.")) {
-            return true;
-        }
-        if (!ip.startsWith("172.")) {
-            return false;
-        }
-        String[] parts = ip.split("\\.");
-        if (parts.length < 2) {
-            return false;
-        }
-        try {
-            int secondOctet = Integer.parseInt(parts[1]);
-            return secondOctet >= 16 && secondOctet <= 31;
-        } catch (NumberFormatException ignored) {
-            return false;
-        }
+        return Ipv4Network.isPrivateIpv4(ip);
     }
 
-    private boolean sameSubnet(String left, String right) {
-        String[] leftParts = left.split("\\.");
-        String[] rightParts = right.split("\\.");
-        if (leftParts.length != 4 || rightParts.length != 4) {
-            return false;
+    private boolean isValidWpaPassword(String password) {
+        if (password.length() >= 8 && password.length() <= 63) {
+            return true;
         }
-        return leftParts[0].equals(rightParts[0])
-                && leftParts[1].equals(rightParts[1])
-                && leftParts[2].equals(rightParts[2]);
+        return password.length() == 64 && isHex(password);
+    }
+
+    private boolean isHex(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char ch = value.charAt(index);
+            boolean isDigit = ch >= '0' && ch <= '9';
+            boolean isLowerHex = ch >= 'a' && ch <= 'f';
+            boolean isUpperHex = ch >= 'A' && ch <= 'F';
+            if (!isDigit && !isLowerHex && !isUpperHex) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void startStatusPolling() {
@@ -2235,12 +2988,13 @@ public class MainActivity extends Activity {
 
     @SuppressLint("MissingPermission")
     private boolean requestPreferredMtu(BluetoothGatt bluetoothGatt) {
-        if (bluetoothGatt == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+        if (bluetoothGatt == null) {
             return false;
         }
         try {
             return bluetoothGatt.requestMtu(DESIRED_ATT_MTU);
-        } catch (SecurityException ignored) {
+        } catch (SecurityException exception) {
+            logEvent("MTU request blocked: " + exception.getClass().getSimpleName());
             return false;
         }
     }
@@ -2350,6 +3104,7 @@ public class MainActivity extends Activity {
         final boolean nameMatch;
         final boolean bonded;
         final boolean remembered;
+        final int rssi;
         final String listEntry;
         final String detailText;
         final String logLine;
@@ -2360,6 +3115,7 @@ public class MainActivity extends Activity {
                 boolean nameMatch,
                 boolean bonded,
                 boolean remembered,
+                int rssi,
                 String listEntry,
                 String detailText,
                 String logLine
@@ -2369,6 +3125,7 @@ public class MainActivity extends Activity {
             this.nameMatch = nameMatch;
             this.bonded = bonded;
             this.remembered = remembered;
+            this.rssi = rssi;
             this.listEntry = listEntry;
             this.detailText = detailText;
             this.logLine = logLine;

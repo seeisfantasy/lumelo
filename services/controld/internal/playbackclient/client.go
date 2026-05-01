@@ -39,6 +39,13 @@ type QueueSnapshot struct {
 	Error             string
 }
 
+type HistorySnapshot struct {
+	Available bool
+	Entries   []HistoryEntry
+	Raw       string
+	Error     string
+}
+
 type QueueEntry struct {
 	OrderIndex   int     `json:"order_index"`
 	QueueEntryID string  `json:"queue_entry_id"`
@@ -48,6 +55,15 @@ type QueueEntry struct {
 	Title        *string `json:"title"`
 	DurationMS   *uint64 `json:"duration_ms"`
 	IsCurrent    bool    `json:"is_current"`
+}
+
+type HistoryEntry struct {
+	PlayedAt     uint64  `json:"played_at"`
+	TrackUID     string  `json:"track_uid"`
+	VolumeUUID   string  `json:"volume_uuid"`
+	RelativePath string  `json:"relative_path"`
+	Title        *string `json:"title"`
+	DurationMS   *uint64 `json:"duration_ms"`
 }
 
 type Event struct {
@@ -98,6 +114,22 @@ func (c *Client) QueueSnapshot(ctx context.Context) QueueSnapshot {
 	return snapshot
 }
 
+func (c *Client) HistorySnapshot(ctx context.Context) HistorySnapshot {
+	line, err := c.request(ctx, "HISTORY_SNAPSHOT")
+	if err != nil {
+		return HistorySnapshot{Error: err.Error()}
+	}
+
+	snapshot, err := parseHistorySnapshotResponse(line)
+	if err != nil {
+		return HistorySnapshot{Raw: line, Error: err.Error()}
+	}
+
+	snapshot.Available = true
+	snapshot.Raw = line
+	return snapshot
+}
+
 func (c *Client) Execute(ctx context.Context, action, trackID string) (string, error) {
 	line, err := commandLine(action, trackID)
 	if err != nil {
@@ -134,11 +166,32 @@ func (c *Client) Execute(ctx context.Context, action, trackID string) (string, e
 
 		return fmt.Sprintf("QUEUE_SNAPSHOT -> entries=%d current_index=%s", len(snapshot.Entries), pointerLabel(snapshot.CurrentOrderIndex)), nil
 	}
+	if fields["kind"] == "history_snapshot" {
+		snapshot, err := parseHistorySnapshotResponse(response)
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf("HISTORY_SNAPSHOT -> entries=%d", len(snapshot.Entries)), nil
+	}
 
 	actionName := strings.ToUpper(fields["action"])
 	state := fields["state"]
 	currentTrack := placeholder(fields["current_track"])
 	return fmt.Sprintf("%s -> state=%s current=%s", actionName, state, currentTrack), nil
+}
+
+func (c *Client) PlayQueue(ctx context.Context, trackIDs []string) (string, error) {
+	if len(trackIDs) == 0 {
+		return "", fmt.Errorf("at least one track id is required for QUEUE_PLAY")
+	}
+
+	payload, err := json.Marshal(trackIDs)
+	if err != nil {
+		return "", fmt.Errorf("encode track context: %w", err)
+	}
+
+	return c.Execute(ctx, "queue_play", string(payload))
 }
 
 func (c *Client) SubscribeEvents(ctx context.Context, handler func(Event) error) error {
@@ -215,6 +268,8 @@ func commandLine(action, trackID string) (string, error) {
 		return "STATUS", nil
 	case "queue_snapshot":
 		return "QUEUE_SNAPSHOT", nil
+	case "history_snapshot":
+		return "HISTORY_SNAPSHOT", nil
 	case "play":
 		trackID = strings.TrimSpace(trackID)
 		if trackID == "" {
@@ -253,6 +308,12 @@ func commandLine(action, trackID string) (string, error) {
 			return "", fmt.Errorf("JSON track list is required for QUEUE_REPLACE")
 		}
 		return "QUEUE_REPLACE " + trackID, nil
+	case "queue_play":
+		trackID = strings.TrimSpace(trackID)
+		if trackID == "" {
+			return "", fmt.Errorf("JSON track list is required for QUEUE_PLAY")
+		}
+		return "QUEUE_PLAY " + trackID, nil
 	case "pause":
 		return "PAUSE", nil
 	case "stop":
@@ -321,6 +382,28 @@ func parseQueueSnapshotResponse(line string) (QueueSnapshot, error) {
 		CurrentOrderIndex: payload.CurrentOrderIndex,
 		Entries:           payload.Entries,
 	}, nil
+}
+
+func parseHistorySnapshotResponse(line string) (HistorySnapshot, error) {
+	kind, fields, err := parseResponse(line)
+	if err != nil {
+		return HistorySnapshot{}, err
+	}
+	if kind != "OK" {
+		return HistorySnapshot{}, fmt.Errorf("unexpected non-OK playback response")
+	}
+	if fields["kind"] != "history_snapshot" {
+		return HistorySnapshot{}, fmt.Errorf("unexpected playback response kind: %s", fields["kind"])
+	}
+
+	var payload struct {
+		Entries []HistoryEntry `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(fields["payload"]), &payload); err != nil {
+		return HistorySnapshot{}, fmt.Errorf("invalid history snapshot payload: %w", err)
+	}
+
+	return HistorySnapshot{Entries: payload.Entries}, nil
 }
 
 func parseEventLine(line string) (Event, error) {
