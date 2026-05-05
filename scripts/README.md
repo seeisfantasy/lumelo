@@ -21,4 +21,8 @@ Current development helpers:
 - `verify-t4-lumelo-rootfs-image.sh`
 - `compare-t4-wireless-golden.sh`
 - `deploy-t4-runtime-update.sh`
+- `package-t4-usb-emmc-official-layout.sh`
+- `verify-t4-usb-emmc-official-layout-package.sh`
+- `package-t4-usb-emmc-raw.sh`
+- `verify-t4-usb-emmc-raw-package.sh`
 - `build-ai-review-docs.py`

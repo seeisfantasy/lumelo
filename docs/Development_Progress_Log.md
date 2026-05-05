@@ -993,3 +993,294 @@ T4 runtime 状态：
 
 - `v24` 尚未刷入 T4 做 cold boot bring-up。
 - 刷入后还需要复验手机 APK `SCAN -> CONNECT -> SEND WI-FI CREDENTIALS`、WebUI 首页 / 曲库 / 设置、USB DAC 播放 smoke。
+
+### 5.26 2026-05-03：新增 Win11 raw image USB-to-eMMC MVP packaging
+
+背景：
+
+- 用户确认 `USB 线刷进 eMMC` 是后续目标。
+- 首版按 `Win11 + RKDevTool` 的 raw image USB-to-eMMC MVP 落地。
+- 本轮不改原有 TF/raw `.img` 出包链，只新增 `out/t4-usb-emmc-raw/` 包装层。
+
+已新增：
+
+- `scripts/package-t4-usb-emmc-raw.sh`
+  - 输入现有 `out/t4-rootfs/lumelo-t4-rootfs-YYYYMMDD-vN.img`
+  - 输入显式传入的官方 `MiniLoaderAll.bin`
+  - 输出 `out/t4-usb-emmc-raw/lumelo-t4-usb-emmc-raw-YYYYMMDD-vN/`
+  - 生成 `manifest.json`、`SHA256SUMS.txt`、`README-WIN11-RKDEVTOOL.md`、`flash-layout-notes.txt`
+- `scripts/verify-t4-usb-emmc-raw-package.sh`
+  - 校验 package 结构、hash、manifest、raw image p1-p9 分区名
+  - 调用 `verify-t4-lumelo-rootfs-image.sh` 做 rootfs 离线 gate
+- `docs/T4_USB_eMMC_Firmware_Requirements.md`
+  - 固定 MVP 边界与后续正式固件包需求
+
+本轮继续获取官方 loader 并生成真实 package：
+
+- 官方 loader 来源：
+  - `http://112.124.9.243/dvdfiles/RK3399/tools/MiniLoaderAll.bin`
+- 本地 loader 缓存：
+  - `out/t4-usb-emmc-raw/loaders/rk3399-20260402/MiniLoaderAll.bin`
+- loader sha256：
+  - `c2a830841eb8c5b0e124816d1201e9c10778751a9912e57a906000477e89d096`
+- 已生成 package：
+  - `out/t4-usb-emmc-raw/lumelo-t4-usb-emmc-raw-20260502-v24/`
+
+已验证：
+
+- `verify-t4-usb-emmc-raw-package.sh = 0 failure(s)`
+- package 内 raw image 的 `verify-t4-lumelo-rootfs-image.sh = 0 failure(s), 0 warning(s)`
+- 原始 `v24` source image hash 未变化：
+  - `945b529810fa39c95e3a707fe65fdac11710d6c8803045ed174db1fbc225229b`
+
+尚未验证：
+
+- 尚未用 Win11 `RKDevTool` 做 MaskROM / eMMC cold boot 真机验证。
+
+校正：
+
+- 2026-05-05 用户使用 FriendlyELEC 官方 `rk3399-usb-debian-trixie-core-4.19-arm64-20260319.zip` 在 Win11 `RKDevTool` 刷写成功。
+- 该成功路径证明 Win11 主线应改为 `Download Image` 多分区 package。
+- 本节记录的 raw full-disk package 不再作为 Win11 主线，只保留为 Linux `rkdeveloptool wl 0` 工程验证候选。
+
+### 5.27 2026-05-05：拆解 FriendlyELEC 官方 USB 固件，USB/eMMC 主线改为多分区 package
+
+背景：
+
+- 用户在 Win11 上用官方 USB 固件包成功刷入 eMMC。
+- 需要重新对照官方资料和官方包结构，纠正 Lumelo USB-to-eMMC packaging 方向。
+
+官方资料结论：
+
+- FriendlyELEC 官方 NanoPC-T4 文档确认：
+  - `usb` image 用于通过 USB 刷入 eMMC。
+  - 固件分为 `single image` 与 `multiple partition images` 两类。
+  - FriendlyELEC 使用的多分区 package 应走 `RKDevTool -> Download Image -> Run`。
+  - `Upgrade Firmware` 只适合 single image firmware。
+
+已拆解官方包：
+
+- 原始包：
+  - `/Users/see/Downloads/rk3399-usb-debian-trixie-core-4.19-arm64-20260319.zip`
+  - `sha256 = 46a4352c4935053d63a2620d69135c580d1aa89dd6bbdcd6b414a3948031cf2d`
+- 解压参考目录：
+  - `out/t4-usb-emmc-raw/reference-official/rk3399-usb-debian-trixie-core-4.19-arm64-20260319/`
+- 关键文件：
+  - `RKDevTool.exe`
+  - `MiniLoaderAll.bin`
+  - `config.cfg`
+  - `config.ini`
+  - `parameter.txt`
+  - `uboot.img`
+  - `trust.img`
+  - `misc.img`
+  - `dtbo.img`
+  - `resource.img`
+  - `kernel.img`
+  - `boot.img`
+  - `rootfs.img`
+  - `userdata.img`
+
+关键发现：
+
+- `rootfs.img` 是 Android sparse image：
+  - block size `4096`
+  - expanded size `2 GiB`
+- `userdata.img` 是 Android sparse image：
+  - block size `4096`
+  - expanded size `200 MiB`
+- `MiniLoaderAll.bin` 与此前获取的官方 loader hash 一致：
+  - `c2a830841eb8c5b0e124816d1201e9c10778751a9912e57a906000477e89d096`
+- 官方 `parameter.txt` 中 `rootfs` 从 `0x00040000` 开始，长度 `0x00400000` sectors；`userdata` 从 `0x00440000` 开始。
+- Lumelo `v24` raw image 的 p1-p8 起始 offset 与官方布局一致，但 rootfs 目前是 1 GiB；后续 USB package 应把 rootfs partition image resize 到 2 GiB 后转 sparse，或生成匹配 Lumelo 自定义布局的 `config.cfg`。
+
+已同步文档：
+
+- [T4_USB_eMMC_Firmware_Requirements.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_USB_eMMC_Firmware_Requirements.md)
+  - 已撤下 raw full-disk Win11 主线路径。
+  - 已写入官方 package 文件结构、分区地址、sparse image 要求和 Lumelo 首版生成方案。
+
+下一步：
+
+- 新增 official-layout package 脚本，替代当前 raw package 主线：
+  - 从 Lumelo raw image 提取 p1-p7。
+  - rootfs resize 到 2 GiB 并转 Android sparse。
+  - 生成 200 MiB sparse userdata。
+  - 复制官方 reference package 的 RKDevTool / config / loader。
+  - 生成 manifest / SHA256SUMS / Win11 README。
+- 新增 official-layout verifier。
+
+### 5.28 2026-05-05：生成 Lumelo Win11 official-layout USB/eMMC package
+
+已新增：
+
+- `scripts/package-t4-usb-emmc-official-layout.sh`
+  - 输入 Lumelo raw image 与 FriendlyELEC official USB reference package。
+  - 输出 Win11 `RKDevTool -> Download Image` 多分区 package。
+  - 从 Lumelo raw image 提取 `uboot/trust/misc/dtbo/resource/kernel/boot`。
+  - 将 Lumelo `rootfs` resize 到官方布局的 `2 GiB`，再转 Android sparse `rootfs.img`。
+  - 生成 `200 MiB` Android sparse `userdata.img`。
+  - 复制官方 `RKDevTool.exe` / `bin/` / `Language/` / `doc/` / `config.cfg` / `config.ini` / `parameter.txt` / `MiniLoaderAll.bin`。
+  - 生成 `manifest.json`、`SHA256SUMS.txt`、`README-WIN11-RKDEVTOOL.md`。
+- `scripts/verify-t4-usb-emmc-official-layout-package.sh`
+  - 离线校验 package 文件完整性。
+  - 校验 `SHA256SUMS.txt`。
+  - 校验 `parameter.txt` 官方分区布局。
+  - 校验 p1-p7 分区镜像大小。
+  - 校验 `rootfs.img` / `userdata.img` Android sparse header。
+  - 校验 source image hash 未变化。
+
+已生成：
+
+- `out/t4-usb-emmc-official-layout/lumelo-t4-usb-emmc-official-layout-20260502-v24/`
+- `out/t4-usb-emmc-official-layout/lumelo-t4-usb-emmc-official-layout-20260502-v24.zip`
+- `out/t4-usb-emmc-official-layout/lumelo-t4-usb-emmc-official-layout-20260502-v24.zip.sha256`
+- package size：约 `941 MiB`
+- zip size：约 `267 MiB`
+- zip sha256：
+  - `db4a0f3e39f5c96478ebbf1ef6ab556d12d434281178ca48373fd7de9e618674`
+- `rootfs.img`：
+  - physical size：约 `772 MiB`
+  - expanded size：`2 GiB`
+- `userdata.img`：
+  - physical size：约 `36 MiB`
+  - expanded size：`200 MiB`
+
+已验证：
+
+- package script 内置 source image gate：
+  - `verify-t4-lumelo-rootfs-image.sh = 0 failure(s), 0 warning(s)`
+- official-layout package verifier：
+  - `verify-t4-usb-emmc-official-layout-package.sh = 0 failure(s)`
+- zip integrity：
+  - `unzip -t = No errors detected`
+- zip checksum：
+  - `shasum -a 256 -c = OK`
+- 原始 `v24` source image hash 未变化：
+  - `945b529810fa39c95e3a707fe65fdac11710d6c8803045ed174db1fbc225229b`
+
+尚未验证：
+
+- 尚未用 Win11 `RKDevTool` 刷写 Lumelo official-layout package。
+- 尚未做 eMMC cold boot 后的 `T4_Bringup_Checklist.md` 全量核查。
+
+### 5.29 2026-05-05：eMMC 固件首启后直插 TF 卡槽扫描修复
+
+背景：
+
+- 用户已将 Lumelo official-layout USB/eMMC package 刷入 T4 eMMC。
+- T4 通过 Wi-Fi 获得 IP：
+  - `192.168.71.3`
+- WebUI 可访问，但用户在曲库页最初只看到读卡器小分区，直插 TF 卡槽里的歌曲没有出现。
+
+现场事实：
+
+- `/healthz = ok`
+- 初始 `/api/v1/library/media` 只返回：
+  - `/dev/sda1`
+  - `fstype = vfat`
+  - `mountpoint = /media/1fda-0401`
+  - `is_mounted = true`
+- 通过 Web API 触发：
+  - `scan_device /dev/sda1`
+- 扫描结果：
+  - `volumes = 1`
+  - `directories = 1`
+  - `albums = 0`
+  - `tracks = 0`
+- SSH 只读确认：
+  - `/media/1fda-0401` 只有 `START.HTM`
+  - 直插 TF 卡槽实际是 `/dev/mmcblk1p1 -> /media/9cf4bd76f4bd52ee`
+  - `/dev/mmcblk1p1` 为 `ntfs`，包含用户此前测试用的音乐文件
+
+根因：
+
+- `lumelo-media-import` 的外部介质发现逻辑只认：
+  - `RM=1`
+  - 或 `TRAN=usb`
+- T4 直插 TF 卡槽在 eMMC boot 下表现为：
+  - `/dev/mmcblk1p1`
+  - `RM=0`
+  - `TRAN=mmc`
+- 因此旧逻辑把 direct TF slot 漏掉了；同时不能简单放开所有 `mmcblk*`，否则会把 eMMC 系统分区也列为可扫描介质。
+
+已修复并 runtime update：
+
+- 曲库页 `本地介质` 区域文案从工程词改为用户动作：
+  - `TF / USB 歌曲扫描`
+  - `重新检测 TF / USB`
+  - `扫描全部已挂载 TF / USB`
+  - `扫描指定目录`
+  - `扫描这张 TF / USB 卡`
+- `lumelo-media-import`：
+  - 增加 non-system `mmcblkXpY` media candidate。
+  - 从 `/proc/cmdline`、`findmnt /` 和 `lsblk PKNAME` 推导 eMMC 系统 parent，排除 rootfs / userdata / system partitions。
+  - 新增 `media source classifier`，分类为 `system / external / internal_explicit / ignored`。
+  - `internal_explicit` 只通过显式 label / uuid / partuuid env 配置启用；当前 V1 默认不启用 eMMC internal media。
+  - `import-device` 对 system disk 和 ignored device 做显式拒绝，避免误扫 eMMC 系统分区。
+  - `--udev-event` 模式下 system / ignored device 返回 success + `action=ignored`，避免通用 block event 留下 failed unit。
+  - Quiet Mode active 时不 mount、不 scan，`--udev-event` 模式下返回 success + `action=deferred`。
+- udev：
+  - 去掉 `mmcblk1p*` 写死规则。
+  - 改成通用 filesystem partition add/change/remove event。
+  - add/change 只触发 oneshot `lumelo-media-import@%k.service`，由 classifier 判断是否处理。
+  - remove 使用 `systemctl --no-block start lumelo-media-reconcile.service`，避免依赖 `SYSTEMD_WANTS` 处理 remove action。
+  - udev-triggered service 改为 `--mount-only`，插入介质只挂载和同步状态，不自动启动曲库扫描。
+- WebUI：
+  - direct TF slot 展示为 `TF 卡槽`，不直接暴露生硬的 `mmc` transport。
+- 已 build Linux arm64 `controld` 并 runtime update 到 `192.168.71.3`。
+- 已替换 live `/usr/bin/lumelo-media-import` 与 udev rule。
+- `controld.service` restart 后 `active`。
+
+已验证：
+
+- `python3 -m py_compile base/rootfs/overlay/usr/bin/lumelo-media-import`
+- `go test ./...` in `services/controld`
+- live `/api/v1/library/media` 返回：
+  - `/dev/sda1 -> /media/1fda-0401`
+  - `/dev/mmcblk1p1 -> /media/9cf4bd76f4bd52ee`
+- live `lumelo-media-import list-devices` 只列出外部候选：
+  - `/dev/sda1`
+  - `/dev/mmcblk1p1`
+  - 未列出 eMMC `/dev/mmcblk2p*` 系统分区。
+- live `lumelo-media-import import-device --udev-event /dev/mmcblk2p8`：
+  - 返回 `source_class=system`
+  - `action=ignored`
+  - exit code `0`
+- live `lumelo-media-import import-device /dev/mmcblk2p8`：
+  - 返回 `source_class=system`
+  - `action=ignored`
+  - exit code `75`
+- live `systemctl start lumelo-media-import@mmcblk2p8.service`：
+  - `Result=success`
+  - `ExecMainStatus=0`
+- live `systemctl start lumelo-media-import@mmcblk1p1.service`：
+  - `Result=success`
+  - `ExecMainStatus=0`
+- live 物理拔出 / 插回 TF 卡：
+  - 拔出阶段已观察到 `media-9cf4bd76f4bd52ee.mount` 自动 unmount。
+  - 插回阶段已观察到 `lumelo-media-import@mmcblk1p1.service` 自动启动。
+  - `/dev/mmcblk1p1` 被 classifier 识别为 `external / non_system_mmc_partition`。
+  - 自动挂载回 `/media/9cf4bd76f4bd52ee`。
+  - 本轮观察到旧 remove 规则未启动 `lumelo-media-reconcile.service`，已改为 remove event 用 `systemctl --no-block start` 触发 reconcile。
+- live 第二轮物理拔出 / 插回 TF 卡：
+  - 拔出时 `lumelo-media-reconcile.service` 已启动。
+  - `media-uuid-9cf4bd76f4bd52ee` 被标记为 `is_available=false`。
+  - 插回时 `lumelo-media-import@mmcblk1p1.service` 已启动。
+  - `/dev/mmcblk1p1` 自动挂载回 `/media/9cf4bd76f4bd52ee`。
+  - `media-uuid-9cf4bd76f4bd52ee` 被标记回 `is_available=true`。
+  - 本轮没有自动启动完整曲库扫描。
+- live `scan_device /dev/mmcblk1p1` 成功：
+  - `volumes = 2`
+  - `albums = 24`
+  - `tracks = 184`
+- live `/library` HTML 已出现：
+  - `24 张专辑 · 184 首歌曲`
+  - `TF 卡槽`
+  - `设备路径：/dev/mmcblk1p1`
+- live `/healthz` 仍为 `ok`。
+
+结论：
+
+- 用户判断正确：旧实现确实把外部介质判断写得太窄，只覆盖 USB 读卡器路径，没有覆盖 T4 direct TF slot。
+- 修复后 eMMC boot + direct TF slot 可识别、可扫描，曲库已入库 `24` 张专辑、`184` 首歌曲。

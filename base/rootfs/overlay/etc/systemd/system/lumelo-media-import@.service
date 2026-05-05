@@ -5,5 +5,5 @@ ConditionPathExists=/usr/bin/lumelo-media-import
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/lumelo-media-import import-device /dev/%I
+ExecStart=/usr/bin/lumelo-media-import import-device --udev-event --mount-only /dev/%I
 TimeoutStartSec=120

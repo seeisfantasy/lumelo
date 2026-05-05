@@ -354,7 +354,9 @@ curl -I http://192.168.1.121/artwork/thumb/320/<hash>.jpg
 当前可用命令：
 
 ```sh
+lumelo-media-import list-devices
 lumelo-media-import list-mounted
+lumelo-media-import import-device /dev/<device>
 lumelo-media-import scan-mounted
 lumelo-media-import scan-path /absolute/path/to/media-root
 ```
@@ -362,8 +364,21 @@ lumelo-media-import scan-path /absolute/path/to/media-root
 判定方式：
 
 - 没有外部介质时：
-  - `list-mounted` 应返回：
+  - `list-devices` 和 `list-mounted` 应返回：
     - `[]`
+- 插入 USB 读卡器或 U 盘时：
+  - `list-devices` 应能看到对应 `/dev/sdXN`。
+- TF 卡直接插入 T4 TF slot 时：
+  - `list-devices` 应能看到 non-system `/dev/mmcblkXpN`。
+  - 不应列出当前系统盘 parent 下的 rootfs / userdata / system partitions。
+- 通用 udev block event classifier：
+  - udev rule 不应写死 `mmcblk1p*` 或 `mmcblk2p*`。
+  - system partition 触发 `lumelo-media-import@%k.service` 时应 success 退出，并输出 `source_class=system` / `action=ignored`。
+  - external media 触发 `lumelo-media-import@%k.service` 时只做 `--mount-only`，不自动启动完整曲库扫描。
+  - remove event 应触发 `lumelo-media-reconcile.service`，不依赖 `SYSTEMD_WANTS` 处理 remove action。
+- 对一个显式块设备执行：
+  - `import-device /dev/<device>`
+  - 应能挂载到 `/media/<uuid-or-label>` 并触发对应目录扫描。
 - 对一个显式目录执行：
   - `scan-path <path>`
   - 应能成功触发：

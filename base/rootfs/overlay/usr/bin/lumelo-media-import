@@ -15,6 +15,12 @@ QUIET_MODE_PATH = Path("/run/lumelo/quiet_mode")
 MEDIA_INDEX_BIN = os.environ.get("LUMELO_MEDIA_INDEX_BIN", "media-indexd")
 DEFAULT_LIBRARY_DB = Path("/var/lib/lumelo/library.db")
 DEFAULT_MOUNT_BASE = Path("/media")
+PROTECTED_SYSTEM_LABELS = {"rootfs", "userdata"}
+
+
+def parse_env_set(name: str) -> set[str]:
+    raw = os.environ.get(name, "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def run(
@@ -47,12 +53,18 @@ def quiet_mode_active() -> bool:
     return quiet_mode_state() != "off"
 
 
-def flatten_lsblk_devices(nodes: Iterable[Dict[str, object]]) -> Iterable[Dict[str, object]]:
+def flatten_lsblk_devices(
+    nodes: Iterable[Dict[str, object]], parent: Optional[Dict[str, object]] = None
+) -> Iterable[Dict[str, object]]:
     for node in nodes:
-        yield node
+        item = dict(node)
+        if parent is not None:
+            item["_parent_name"] = str(parent.get("name") or "")
+            item["_parent_path"] = str(parent.get("path") or "")
+        yield item
         children = node.get("children")
         if isinstance(children, list):
-            yield from flatten_lsblk_devices(children)
+            yield from flatten_lsblk_devices(children, node)
 
 
 def normalize_mountpoints(raw: object) -> List[str]:
@@ -118,6 +130,210 @@ def mountpoint_active(path: Path) -> bool:
     return completed.returncode == 0
 
 
+def derived_parent_name(path: Path) -> str:
+    name = path.name
+    if re.match(r"^mmcblk[0-9]+p[0-9]+$", name):
+        return name.rsplit("p", 1)[0]
+    if re.match(r"^sd[a-z]+[0-9]+$", name):
+        return re.sub(r"[0-9]+$", "", name)
+    return name
+
+
+def lsblk_parent_name(path: Path) -> str:
+    completed = run(
+        ["lsblk", "-no", "PKNAME", str(path)],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode == 0:
+        parent = completed.stdout.strip().splitlines()
+        if parent and parent[0]:
+            return parent[0]
+    return derived_parent_name(path)
+
+
+def system_block_parent_names() -> set[str]:
+    parents: set[str] = set()
+    completed = run(
+        ["findmnt", "-rn", "-M", "/", "-o", "SOURCE"],
+        check=False,
+        capture_output=True,
+    )
+    for line in completed.stdout.splitlines():
+        source = line.strip()
+        if not source.startswith("/dev/"):
+            continue
+        parent = lsblk_parent_name(Path(source))
+        if parent:
+            parents.add(parent)
+    try:
+        cmdline = Path("/proc/cmdline").read_text(encoding="utf-8")
+    except OSError:
+        cmdline = ""
+    for token in cmdline.split():
+        key, sep, value = token.partition("=")
+        if sep and key in {"root", "data"} and value.startswith("/dev/"):
+            parent = lsblk_parent_name(Path(value))
+            if parent:
+                parents.add(parent)
+    return parents
+
+
+def device_parent_name(device: Dict[str, object]) -> str:
+    parent = str(device.get("_parent_name") or "")
+    if parent:
+        return parent
+    path = Path(str(device.get("path") or ""))
+    if not str(path):
+        return ""
+    return derived_parent_name(path)
+
+
+def explicit_internal_media_match(
+    label: str, uuid: str, partuuid: str, fstype: str
+) -> tuple[bool, str]:
+    if not fstype:
+        return False, ""
+    labels = parse_env_set("LUMELO_INTERNAL_MEDIA_LABELS")
+    uuids = parse_env_set("LUMELO_INTERNAL_MEDIA_UUIDS")
+    partuuids = parse_env_set("LUMELO_INTERNAL_MEDIA_PARTUUIDS")
+    if label and label in labels:
+        return True, "label"
+    if uuid and uuid in uuids:
+        return True, "uuid"
+    if partuuid and partuuid in partuuids:
+        return True, "partuuid"
+    return False, ""
+
+
+def classify_media_source(
+    device: Dict[str, object],
+    system_parents: set[str],
+    blkid_info: Optional[Dict[str, str]] = None,
+) -> Dict[str, object]:
+    blkid_info = blkid_info or {}
+    device_type = str(device.get("type") or "")
+    if device_type not in {"part", "disk"}:
+        return {
+            "source_class": "ignored",
+            "source_reason": "unsupported_block_type",
+            "is_media_candidate": False,
+        }
+    children = device.get("children")
+    if device_type == "disk" and isinstance(children, list):
+        if any(str(child.get("type") or "") == "part" for child in children):
+            return {
+                "source_class": "ignored",
+                "source_reason": "parent_disk_has_partitions",
+                "is_media_candidate": False,
+            }
+
+    path = str(device.get("path") or "")
+    if not path:
+        return {
+            "source_class": "ignored",
+            "source_reason": "missing_device_path",
+            "is_media_candidate": False,
+        }
+
+    parent = device_parent_name(device)
+    label = str(device.get("label") or blkid_info.get("LABEL", ""))
+    uuid = str(device.get("uuid") or blkid_info.get("UUID", ""))
+    partuuid = str(device.get("partuuid") or blkid_info.get("PARTUUID", ""))
+    fstype = str(device.get("fstype") or blkid_info.get("TYPE", ""))
+    if label in PROTECTED_SYSTEM_LABELS:
+        return {
+            "source_class": "system",
+            "source_reason": "protected_system_label",
+            "is_media_candidate": False,
+        }
+
+    internal_match, internal_reason = explicit_internal_media_match(
+        label, uuid, partuuid, fstype
+    )
+    if internal_match:
+        return {
+            "source_class": "internal_explicit",
+            "source_reason": f"configured_internal_{internal_reason}",
+            "is_media_candidate": True,
+        }
+
+    if parent in system_parents:
+        return {
+            "source_class": "system",
+            "source_reason": "current_system_disk",
+            "is_media_candidate": False,
+        }
+
+    if not fstype:
+        return {
+            "source_class": "ignored",
+            "source_reason": "missing_filesystem",
+            "is_media_candidate": False,
+        }
+
+    removable = bool(device.get("rm"))
+    transport = str(device.get("tran") or "")
+    if removable:
+        return {
+            "source_class": "external",
+            "source_reason": "removable_block_device",
+            "is_media_candidate": True,
+        }
+    if transport == "usb":
+        return {
+            "source_class": "external",
+            "source_reason": "usb_storage",
+            "is_media_candidate": True,
+        }
+
+    if re.match(r"^/dev/mmcblk[0-9]+p[0-9]+$", path):
+        return {
+            "source_class": "external",
+            "source_reason": "non_system_mmc_partition",
+            "is_media_candidate": True,
+        }
+    if re.match(r"^/dev/loop[0-9]+$", path):
+        return {
+            "source_class": "external",
+            "source_reason": "loopback_test_media",
+            "is_media_candidate": True,
+        }
+
+    return {
+        "source_class": "ignored",
+        "source_reason": "not_external_media",
+        "is_media_candidate": False,
+    }
+
+
+def load_lsblk_device(device_path: Path) -> Dict[str, object]:
+    completed = run(
+        [
+            "lsblk",
+            "-J",
+            "-o",
+            "NAME,PATH,TYPE,RM,TRAN,LABEL,FSTYPE,MOUNTPOINTS,UUID,PARTUUID",
+            str(device_path),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode == 0:
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            payload = {}
+        for device in flatten_lsblk_devices(payload.get("blockdevices", [])):
+            if str(device.get("path") or "") == str(device_path):
+                return device
+    return {
+        "name": device_path.name,
+        "path": str(device_path),
+        "type": "part" if re.search(r"[0-9]$", device_path.name) else "disk",
+    }
+
+
 def build_mountpoint(device: Path, blkid_info: Dict[str, str], mount_base: Path) -> Path:
     raw_name = (
         blkid_info.get("LABEL")
@@ -142,9 +358,12 @@ def wait_for_mount(device: Path, mountpoint: Path, timeout: float) -> Path:
 
 
 def ensure_device_mounted(
-    device: Path, mount_base: Path, timeout: float
+    device: Path,
+    mount_base: Path,
+    timeout: float,
+    blkid_info: Optional[Dict[str, str]] = None,
 ) -> tuple[Path, Dict[str, str], bool]:
-    blkid_info = blkid_export(device)
+    blkid_info = blkid_info or blkid_export(device)
     existing_target = device_mount_target(device)
     if existing_target is not None:
         return existing_target, blkid_info, False
@@ -179,17 +398,16 @@ def discover_mounted_removable_media() -> List[Dict[str, str]]:
     devices = payload.get("blockdevices", [])
     results: List[Dict[str, str]] = []
     seen_mounts = set()
+    system_parents = system_block_parent_names()
     for device in flatten_lsblk_devices(devices):
         mountpoints = normalize_mountpoints(device.get("mountpoints"))
         if not mountpoints:
             continue
-        if str(device.get("type") or "") not in {"part", "disk"}:
-            continue
-        removable = bool(device.get("rm"))
-        transport = str(device.get("tran") or "")
-        if not removable and transport != "usb":
-            continue
         device_path = Path(str(device.get("path") or ""))
+        classification = classify_media_source(device, system_parents)
+        if not classification.get("is_media_candidate", False):
+            continue
+        transport = str(device.get("tran") or "")
         blkid_info = blkid_export(device_path) if str(device_path) else {}
         for mountpoint in mountpoints:
             if mountpoint in seen_mounts:
@@ -207,6 +425,8 @@ def discover_mounted_removable_media() -> List[Dict[str, str]]:
                     "transport": transport,
                     "mountpoint": mountpoint,
                     "volume_uuid": stable_volume_uuid(device_path, blkid_info),
+                    "source_class": str(classification.get("source_class") or ""),
+                    "source_reason": str(classification.get("source_reason") or ""),
                 }
             )
     results.sort(key=lambda item: item["mountpoint"])
@@ -227,24 +447,20 @@ def discover_removable_media_devices() -> List[Dict[str, object]]:
     devices = payload.get("blockdevices", [])
     results: List[Dict[str, object]] = []
     seen_paths = set()
+    system_parents = system_block_parent_names()
     for device in flatten_lsblk_devices(devices):
         device_type = str(device.get("type") or "")
-        if device_type not in {"part", "disk"}:
-            continue
-        children = device.get("children")
-        if device_type == "disk" and isinstance(children, list):
-            if any(str(child.get("type") or "") == "part" for child in children):
-                continue
         removable = bool(device.get("rm"))
         transport = str(device.get("tran") or "")
-        if not removable and transport != "usb":
-            continue
 
         device_path = Path(str(device.get("path") or ""))
         if not str(device_path) or str(device_path) in seen_paths:
             continue
         seen_paths.add(str(device_path))
 
+        classification = classify_media_source(device, system_parents)
+        if not classification.get("is_media_candidate", False):
+            continue
         blkid_info = blkid_export(device_path)
         mountpoints = normalize_mountpoints(device.get("mountpoints"))
         active_mountpoints = [
@@ -270,10 +486,17 @@ def discover_removable_media_devices() -> List[Dict[str, object]]:
                 "mountpoint": mountpoint,
                 "is_mounted": bool(mountpoint),
                 "volume_uuid": stable_volume_uuid(device_path, blkid_info),
+                "source_class": str(classification.get("source_class") or ""),
+                "source_reason": str(classification.get("source_reason") or ""),
             }
         )
 
-    results.sort(key=lambda item: (str(item.get("mountpoint") or ""), str(item.get("path") or "")))
+    results.sort(
+        key=lambda item: (
+            str(item.get("mountpoint") or ""),
+            str(item.get("path") or ""),
+        )
+    )
     return results
 
 
@@ -401,8 +624,38 @@ def command_import_device(args: argparse.Namespace) -> int:
         print(f"device path does not exist: {device}", file=sys.stderr)
         return 66
 
+    lsblk_device = load_lsblk_device(device)
+    system_parents = system_block_parent_names()
+    classification = classify_media_source(lsblk_device, system_parents)
+    if not classification.get("is_media_candidate", False):
+        payload = {
+            "device": str(device),
+            "source_class": classification.get("source_class", "ignored"),
+            "source_reason": classification.get("source_reason", "not_media"),
+            "action": "ignored",
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        if args.udev_event:
+            return 0
+        return 75 if payload["source_class"] == "system" else 65
+
+    blkid_info = blkid_export(device)
+    classification = classify_media_source(lsblk_device, system_parents, blkid_info)
+    if quiet_mode_active() and not args.force:
+        payload = {
+            "device": str(device),
+            "source_class": classification.get("source_class", ""),
+            "source_reason": classification.get("source_reason", ""),
+            "action": "deferred",
+            "reason": "quiet_mode_active",
+        }
+        print(json.dumps(payload, ensure_ascii=False))
+        if args.udev_event:
+            return 0
+        return 75
+
     mountpoint, blkid_info, mounted_now = ensure_device_mounted(
-        device, Path(args.mount_base), args.timeout
+        device, Path(args.mount_base), args.timeout, blkid_info
     )
     volume_uuid = stable_volume_uuid(device, blkid_info)
     print(
@@ -415,22 +668,15 @@ def command_import_device(args: argparse.Namespace) -> int:
                 "uuid": blkid_info.get("UUID", ""),
                 "fstype": blkid_info.get("TYPE", ""),
                 "volume_uuid": volume_uuid,
+                "source_class": classification.get("source_class", ""),
+                "source_reason": classification.get("source_reason", ""),
+                "action": "mounted" if args.mount_only else "mounted_pending_scan",
             },
             ensure_ascii=False,
         )
     )
 
     if args.mount_only:
-        updates = reconcile_volumes(Path(args.db))
-        if updates:
-            print(json.dumps({"reconciled": updates}, ensure_ascii=False, indent=2))
-        return 0
-
-    if quiet_mode_active() and not args.force:
-        print(
-            "playback quiet mode is active; mounted device but skipped scan unless --force is used",
-            file=sys.stderr,
-        )
         updates = reconcile_volumes(Path(args.db))
         if updates:
             print(json.dumps({"reconciled": updates}, ensure_ascii=False, indent=2))
@@ -493,6 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_device_cmd.add_argument("--db", default=str(DEFAULT_LIBRARY_DB))
     import_device_cmd.add_argument("--mount-base", default=str(DEFAULT_MOUNT_BASE))
     import_device_cmd.add_argument("--mount-only", action="store_true")
+    import_device_cmd.add_argument("--udev-event", action="store_true")
     import_device_cmd.add_argument("--timeout", type=float, default=10.0)
     import_device_cmd.add_argument("--force", action="store_true")
     import_device_cmd.set_defaults(func=command_import_device)

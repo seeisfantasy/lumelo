@@ -1010,14 +1010,14 @@ func TestLibraryPageRendersMediaImportControls(t *testing.T) {
 	body := response.Body.String()
 	for _, fragment := range []string{
 		"本地介质",
-		"挂载与扫描",
-		"刷新设备",
-		"扫描所有已挂载介质",
-		"选择目录扫描",
+		"TF / USB 歌曲扫描",
+		"重新检测 TF / USB",
+		"扫描全部已挂载 TF / USB",
+		"扫描指定目录",
 		"TF Music",
 		"/dev/sda1",
 		"/media/tf-music",
-		"扫描此介质",
+		"扫描这张 TF / USB 卡",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected library page media controls to include %s, body: %s", fragment, body)

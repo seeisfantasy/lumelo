@@ -96,23 +96,23 @@ Android 工具：
 
 最近可用 live 板：
 
-- `T4 192.168.71.12`
-- Wi-Fi 连接
+- `T4 192.168.71.3`
+- Wi-Fi 连接，eMMC boot
 - MAC: `C0-84-7D-1F-37-C7`
-- WebUI: `http://192.168.71.12/`
+- WebUI: `http://192.168.71.3/`
 - mDNS WebUI: `http://lumelo.local/`
-- SSH: `root@192.168.71.12`
+- SSH: `root@192.168.71.3`
 
 最近 live runtime 验证结果：
 
 - `bluetooth.service = active`
 - `lumelo-bluetooth-provisioning.service = active`
 - `lumelo-wifi-provisiond.service = active`
-- `http://192.168.71.12/healthz`
+- `http://192.168.71.3/healthz`
   - `status=ok`
   - `interface_mode=wifi`
   - `playback_available=true`
-  - `playback_state=stopped`
+  - `playback_state=idle`
   - `provisioning_state=connected`
 - 当前 USB DAC：
   - `iBasso-DC04-Pro`
@@ -141,9 +141,11 @@ Android 工具：
     - 显示当前 TF / USB device path、mountpoint、fstype、volume uuid
     - 支持刷新设备、挂载、扫描此介质、扫描所有已挂载介质、选择目录扫描、同步挂载状态
     - 扫描类命令在 `pre_quiet / quiet_active` 时由 `controld` 拦截，避免播放期启动 `media-indexd`
-  - live `T4 192.168.71.12` 已 runtime update 验证：
-    - `/api/v1/library/media` 返回当前 U 盘 `/dev/sda1 -> /media/9cf4bd76f4bd52ee`
-    - `/library` SSR 已出现本地介质管理入口
+  - live `T4 192.168.71.3` 已 runtime update 验证：
+    - `/api/v1/library/media` 返回读卡器小分区 `/dev/sda1 -> /media/1fda-0401`
+    - `/api/v1/library/media` 返回 direct TF slot `/dev/mmcblk1p1 -> /media/9cf4bd76f4bd52ee`
+    - `scan_device /dev/mmcblk1p1` 成功入库 `24` 张专辑、`184` 首歌曲
+    - `/library` SSR 已显示 `TF 卡槽` 和 `24 张专辑 · 184 首歌曲`
 
 ## 6. 最近钉死的 classic Bluetooth 根因
 
@@ -262,6 +264,48 @@ APK 输出路径：
 - 真实曲目播放到队尾后的 `repeat_mode=one/all` 自动续播行为，本轮只做了 API/UI 和 playbackd 单元验证。
 - 后续新增 DFF / DSF 文件的全量扫描路径已由单元测试覆盖，但尚未在真机重新跑一次完整 `scan-mounted`。
 
+2026-05-05 eMMC 首启后的曲库扫描现场：
+
+- T4 eMMC boot 后 IP 为 `192.168.71.3`，WebUI 可访问。
+- 用户确认同一张 TF 卡在 Windows 上能看到歌曲，以前通过 USB 读卡器插 T4 可正常测试，这次是 TF 卡直接插入 T4 TF slot。
+- 已确认旧实现确实写窄了：
+  - `lumelo-media-import` 只认 `RM=1` 或 `TRAN=usb`
+  - direct TF slot 是 `/dev/mmcblk1p1`，`RM=0`，`TRAN=mmc`
+  - 所以直插 TF slot 被漏掉。
+- 已修复：
+  - non-system `mmcblkXpY` 可作为 media candidate。
+  - 从 `/proc/cmdline`、`findmnt /`、`lsblk PKNAME` 排除 eMMC 系统 parent。
+  - `lumelo-media-import` 已升级为 `media source classifier`：
+    - `system`
+    - `external`
+    - `internal_explicit`
+    - `ignored`
+  - `internal_explicit` 只通过显式 label / uuid / partuuid env 配置启用；当前 V1 默认不启用 eMMC internal media。
+  - udev 已去掉 `mmcblk1p*` 写死规则，改为通用 filesystem partition event。
+  - udev-triggered `lumelo-media-import@%k.service` 使用 `--udev-event --mount-only`：
+    - system / ignored device 返回 success + `action=ignored`
+    - external media 只挂载和同步状态，不自动启动曲库扫描
+    - Quiet Mode active 时不 mount、不 scan，返回 success + `action=deferred`
+  - remove event 不再依赖 `SYSTEMD_WANTS`，改为短 `systemctl --no-block start lumelo-media-reconcile.service`。
+- 已 runtime update `controld`，把曲库页入口改为更直观的：
+  - `TF / USB 歌曲扫描`
+  - `扫描这张 TF / USB 卡`
+  - `扫描全部已挂载 TF / USB`
+- 已 runtime update `lumelo-media-import` 和 udev rule。
+- live 验证：
+  - `/api/v1/library/media` 返回 `/dev/sda1` 和 `/dev/mmcblk1p1`
+  - `lumelo-media-import list-devices` 未列出 eMMC `/dev/mmcblk2p*`
+  - `systemctl start lumelo-media-import@mmcblk2p8.service` 成功退出，system partition 被 classifier ignore
+  - `systemctl start lumelo-media-import@mmcblk1p1.service` 成功退出，只走 mount-only
+  - 用户物理拔出 / 插回 TF 卡时，插回阶段已触发 `lumelo-media-import@mmcblk1p1.service`，并自动挂载回 `/media/9cf4bd76f4bd52ee`
+  - 旧 remove 规则未启动 `lumelo-media-reconcile.service`，已改为 remove event 用 `systemctl --no-block start` 触发 reconcile。
+  - 第二轮物理拔出 / 插回已复验：
+    - 拔出时 volume 被标记为 `is_available=false`
+    - 插回时 volume 被标记回 `is_available=true`
+    - 未自动启动完整曲库扫描
+  - `scan_device /dev/mmcblk1p1` 成功：`albums=24 tracks=184`
+  - `/library` 显示 `TF 卡槽` 和 `24 张专辑 · 184 首歌曲`
+
 ## 9. 当前 image / 出包状态
 
 最近已产出的 checkpoint image：
@@ -289,6 +333,35 @@ APK 输出路径：
 - 默认继续在线修。
 - 只有用户明确说出包或刷某个 image 时，再进入镜像交付 / 烧录链。
 
+### USB-to-eMMC packaging 当前结论
+
+2026-05-05 用户已用 FriendlyELEC 官方 `rk3399-usb-debian-trixie-core-4.19-arm64-20260319.zip` 在 Win11 `RKDevTool` 刷入 eMMC 成功。
+
+当前结论：
+
+- Lumelo Win11 USB-to-eMMC 主线应改为 FriendlyELEC 风格 `Download Image` 多分区 package。
+- 早前 `raw full-disk image + RKDevTool address 0x0` 方案不再作为 Win11 主线。
+- 官方包已拆解到：
+  - `out/t4-usb-emmc-raw/reference-official/rk3399-usb-debian-trixie-core-4.19-arm64-20260319/`
+- 关键要求已写入：
+  - [T4_USB_eMMC_Firmware_Requirements.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_USB_eMMC_Firmware_Requirements.md)
+- 已新增 official-layout package 脚本：
+  - `scripts/package-t4-usb-emmc-official-layout.sh`
+  - `scripts/verify-t4-usb-emmc-official-layout-package.sh`
+- 已生成首个 package：
+  - `out/t4-usb-emmc-official-layout/lumelo-t4-usb-emmc-official-layout-20260502-v24/`
+- 已生成可交付 zip：
+  - `out/t4-usb-emmc-official-layout/lumelo-t4-usb-emmc-official-layout-20260502-v24.zip`
+  - `sha256 = db4a0f3e39f5c96478ebbf1ef6ab556d12d434281178ca48373fd7de9e618674`
+- 已验证：
+  - source rootfs image verifier：`0 failure(s), 0 warning(s)`
+  - official-layout package verifier：`0 failure(s)`
+  - zip integrity：`unzip -t = No errors detected`
+  - zip checksum：`shasum -a 256 -c = OK`
+- 尚未验证：
+  - 尚未在 Win11 `RKDevTool` 上刷 Lumelo official-layout package。
+  - 尚未做 eMMC cold boot 后的 T4 bring-up checklist。
+
 ## 10. 当前文档整理状态
 
 2026-04-25 已做文档整理：
@@ -310,7 +383,7 @@ APK 输出路径：
 
 如果用户没有新指令，建议按这个顺序继续：
 
-1. 继续在线验证 live `T4 192.168.71.12`。
+1. 继续在线验证 live `T4 192.168.71.3`。
 2. 补 APK recovery 分支专门现场回归：
    - `ack timeout`
    - `write failed`

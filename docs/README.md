@@ -24,6 +24,7 @@
 - T4 真机 bring-up、无线金样、板级排障：
   - 看 [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
   - 看 [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)
+  - 看 [T4_USB_eMMC_Firmware_Requirements.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_USB_eMMC_Firmware_Requirements.md)
 - 历史提案、旧 MVP、阶段性问题清单：
   - 看 `docs/archive/`
 
@@ -55,6 +56,8 @@
   - T4 真机 bring-up 与烧录后核查清单
 - [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)
   - T4 无线金样与 Lumelo 当前差异
+- [T4_USB_eMMC_Firmware_Requirements.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_USB_eMMC_Firmware_Requirements.md)
+  - Win11 RKDevTool `Download Image` 多分区 USB-to-eMMC package 需求
 - `docs/review/`
   - 给外部 AI 使用的静态审查文档包
 

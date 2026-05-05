@@ -32,18 +32,20 @@ type Snapshot struct {
 }
 
 type Device struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Type       string `json:"type"`
-	Removable  bool   `json:"removable"`
-	Transport  string `json:"transport,omitempty"`
-	Label      string `json:"label,omitempty"`
-	UUID       string `json:"uuid,omitempty"`
-	PartUUID   string `json:"partuuid,omitempty"`
-	FSType     string `json:"fstype,omitempty"`
-	Mountpoint string `json:"mountpoint,omitempty"`
-	IsMounted  bool   `json:"is_mounted"`
-	VolumeUUID string `json:"volume_uuid,omitempty"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	Type         string `json:"type"`
+	Removable    bool   `json:"removable"`
+	Transport    string `json:"transport,omitempty"`
+	Label        string `json:"label,omitempty"`
+	UUID         string `json:"uuid,omitempty"`
+	PartUUID     string `json:"partuuid,omitempty"`
+	FSType       string `json:"fstype,omitempty"`
+	Mountpoint   string `json:"mountpoint,omitempty"`
+	IsMounted    bool   `json:"is_mounted"`
+	VolumeUUID   string `json:"volume_uuid,omitempty"`
+	SourceClass  string `json:"source_class,omitempty"`
+	SourceReason string `json:"source_reason,omitempty"`
 }
 
 type CommandRequest struct {
