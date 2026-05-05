@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -72,6 +74,7 @@ type homeViewData struct {
 	EventSocket          string
 	LibraryDBPath        string
 	ConfigPath           string
+	ConfigWarning        string
 	PlaybackStatus       playbackclient.Status
 	NowPlaying           libraryNowPlayingView
 	QueueSnapshot        playbackclient.QueueSnapshot
@@ -143,6 +146,7 @@ type provisioningViewData struct {
 	CurrentPage  string
 	Provisioning provisioningclient.Snapshot
 	AudioOutput  audiodevice.Snapshot
+	Settings     settings.Config
 	RawJSON      string
 }
 
@@ -243,6 +247,10 @@ type healthView struct {
 }
 
 const defaultLogLines = 300
+const maxRequestBodyBytes int64 = 1 << 20
+const maxPlaybackEventSubscribers = 8
+const maxLibraryPlaybackCandidateTrackIDs = 500
+const maxRemoteTrackIDBytes = 512
 
 func effectiveInterfaceMode(configured string, provisioning provisioningclient.Snapshot) string {
 	if mode := interfaceModeFromProvisioning(provisioning); mode != "" {
@@ -440,6 +448,16 @@ func New(deps Dependencies) (*Server, error) {
 	if mediaImport == nil {
 		mediaImport = unavailableMediaImportSource{}
 	}
+	if deps.Auth == nil {
+		deps.Auth = auth.NewService(false)
+	}
+	settingsStore := settings.NewStore(deps.Settings)
+	deps.Settings = settingsStore.Current()
+	currentDeps := func() Dependencies {
+		current := deps
+		current.Settings = settingsStore.Current()
+		return current
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
@@ -447,11 +465,110 @@ func New(deps Dependencies) (*Server, error) {
 		mux.Handle("/artwork/", http.StripPrefix("/artwork/", http.FileServer(http.Dir(deps.ArtworkCacheRoot))))
 	}
 
+	mux.HandleFunc("/setup-admin", func(w http.ResponseWriter, r *http.Request) {
+		if !deps.Auth.Required() {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		if deps.Auth.PasswordConfigured() {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			renderAuthForm(w, "首次设置管理密码", "/setup-admin", "设置密码", "")
+		case http.MethodPost:
+			if !sameOriginRequest(r) {
+				writeAuthError(w, http.StatusForbidden, "csrf_origin_check_failed")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 4096)
+			if err := r.ParseForm(); err != nil {
+				renderAuthForm(w, "首次设置管理密码", "/setup-admin", "设置密码", fmt.Sprintf("parse setup form: %v", err))
+				return
+			}
+			password := r.Form.Get("password")
+			confirm := r.Form.Get("confirm_password")
+			if password != confirm {
+				renderAuthForm(w, "首次设置管理密码", "/setup-admin", "设置密码", "passwords do not match")
+				return
+			}
+			if err := deps.Auth.SetPassword(password); err != nil {
+				renderAuthForm(w, "首次设置管理密码", "/setup-admin", "设置密码", err.Error())
+				return
+			}
+			token, err := deps.Auth.CreateSession()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			setSessionCookie(w, token)
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		if !deps.Auth.Required() {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		if !deps.Auth.PasswordConfigured() {
+			http.Redirect(w, r, "/setup-admin", http.StatusSeeOther)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			renderAuthForm(w, "登录 Lumelo", "/login", "登录", "")
+		case http.MethodPost:
+			if !sameOriginRequest(r) {
+				writeAuthError(w, http.StatusForbidden, "csrf_origin_check_failed")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 4096)
+			if err := r.ParseForm(); err != nil {
+				renderAuthForm(w, "登录 Lumelo", "/login", "登录", fmt.Sprintf("parse login form: %v", err))
+				return
+			}
+			if ok, retryAfter := deps.Auth.Authenticate(r.Form.Get("password")); !ok {
+				if retryAfter > 0 {
+					renderAuthForm(w, "登录 Lumelo", "/login", "登录", fmt.Sprintf("too many failed attempts; retry after %s", retryAfter.Round(time.Second)))
+					return
+				}
+				renderAuthForm(w, "登录 Lumelo", "/login", "登录", "invalid password")
+				return
+			}
+			token, err := deps.Auth.CreateSession()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			setSessionCookie(w, token)
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/logout", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if cookie, err := r.Cookie(auth.DefaultCookieName); err == nil {
+			deps.Auth.DeleteSession(cookie.Value)
+		}
+		clearSessionCookie(w)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	})
+
 	renderHealth := func(w http.ResponseWriter, r *http.Request) {
+		current := currentDeps()
 		playbackStatus := deps.Playback.Status(r.Context())
 		librarySnapshot := deps.Library.Snapshot(r.Context())
 		provisioningSnapshot := provisioning.Snapshot(r.Context())
-		response := buildHealthPayload(deps, playbackStatus, librarySnapshot, provisioningSnapshot)
+		response := buildHealthPayload(current, playbackStatus, librarySnapshot, provisioningSnapshot)
 		if err := writeJSON(w, response); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
@@ -471,7 +588,97 @@ func New(deps Dependencies) (*Server, error) {
 			return
 		}
 
-		if err := writeJSON(w, buildSystemSummaryView(deps, provisioning.Snapshot(r.Context()))); err != nil {
+		if err := writeJSON(w, buildSystemSummaryView(currentDeps(), provisioning.Snapshot(r.Context()))); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			if err := writeJSON(w, buildSettingsView(settingsStore.Current(), false)); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		case http.MethodPost:
+			request, err := decodeSettingsUpdateRequest(r)
+			if err != nil {
+				_ = writeJSONStatus(w, http.StatusBadRequest, settingsUpdateResponse{
+					OK:    false,
+					Error: err.Error(),
+				})
+				return
+			}
+			current := settingsStore.Current()
+			next := applySettingsUpdateRequest(current, request)
+			if err := settings.Validate(next); err != nil {
+				_ = writeJSONStatus(w, http.StatusBadRequest, settingsUpdateResponse{
+					OK:             false,
+					RequiresReboot: settings.RequiresReboot(current, next),
+					Settings:       buildSettingsView(next, settings.RequiresReboot(current, next)),
+					Error:          err.Error(),
+				})
+				return
+			}
+			requiresReboot := settings.RequiresReboot(current, next)
+			if !request.Commit {
+				if err := writeJSON(w, settingsUpdateResponse{
+					OK:             true,
+					Committed:      false,
+					RequiresReboot: requiresReboot,
+					Settings:       buildSettingsView(next, requiresReboot),
+				}); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
+				return
+			}
+			if err := settings.SaveAtomic(next.ConfigPath, next); err != nil {
+				_ = writeJSONStatus(w, http.StatusInternalServerError, settingsUpdateResponse{
+					OK:             false,
+					RequiresReboot: requiresReboot,
+					Settings:       buildSettingsView(next, requiresReboot),
+					Error:          err.Error(),
+				})
+				return
+			}
+			if deps.SSH != nil {
+				if err := deps.SSH.SetEnabled(next.SSHEnabled); err != nil {
+					_ = writeJSONStatus(w, http.StatusInternalServerError, settingsUpdateResponse{
+						OK:             false,
+						RequiresReboot: requiresReboot,
+						Settings:       buildSettingsView(next, requiresReboot),
+						Error:          err.Error(),
+					})
+					return
+				}
+			}
+			settingsStore.Commit(next)
+			if err := writeJSON(w, settingsUpdateResponse{
+				OK:             true,
+				Committed:      true,
+				RequiresReboot: requiresReboot,
+				Settings:       buildSettingsView(settingsStore.Current(), requiresReboot),
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/api/v1/system/reboot-request", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		message, err := requestSystemReboot(r.Context())
+		if err != nil {
+			_ = writeJSONStatus(w, http.StatusInternalServerError, rebootRequestResponse{
+				OK:    false,
+				Error: err.Error(),
+			})
+			return
+		}
+		if err := writeJSON(w, rebootRequestResponse{OK: true, Message: message}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
@@ -496,6 +703,7 @@ func New(deps Dependencies) (*Server, error) {
 	})
 
 	renderHome := func(w http.ResponseWriter, r *http.Request, commandMessage, commandError string) {
+		current := currentDeps()
 		status := deps.Playback.Status(r.Context())
 		queueSnapshot := deps.Playback.QueueSnapshot(r.Context())
 		historySnapshot := deps.Playback.HistorySnapshot(r.Context())
@@ -505,15 +713,16 @@ func New(deps Dependencies) (*Server, error) {
 		data := homeViewData{
 			InlineCSS:            appCSS,
 			CurrentPage:          "home",
-			Mode:                 deps.Settings.Mode,
-			InterfaceMode:        effectiveInterfaceMode(deps.Settings.InterfaceMode, provisioningSnapshot),
-			DSDPolicy:            deps.Settings.DSDPolicy,
+			Mode:                 current.Settings.Mode,
+			InterfaceMode:        effectiveInterfaceMode(current.Settings.InterfaceMode, provisioningSnapshot),
+			DSDPolicy:            current.Settings.DSDPolicy,
 			PasswordConfigured:   deps.Auth.PasswordConfigured(),
 			SSHEnabled:           deps.SSH.Enabled(),
 			CommandSocket:        deps.Playback.CommandSocket,
 			EventSocket:          deps.Playback.EventSocket,
 			LibraryDBPath:        deps.Library.LibraryDBPath,
-			ConfigPath:           deps.Settings.ConfigPath,
+			ConfigPath:           current.Settings.ConfigPath,
+			ConfigWarning:        current.Settings.Warning,
 			PlaybackStatus:       status,
 			NowPlaying:           buildLibraryNowPlayingView(status, queueSnapshot, librarySnapshot),
 			QueueSnapshot:        queueSnapshot,
@@ -734,6 +943,7 @@ func New(deps Dependencies) (*Server, error) {
 			CurrentPage:  "provisioning",
 			Provisioning: snapshot,
 			AudioOutput:  audioSnapshot,
+			Settings:     settingsStore.Current(),
 			RawJSON:      string(rawJSON),
 		}
 
@@ -942,9 +1152,17 @@ func New(deps Dependencies) (*Server, error) {
 		}
 	})
 
+	playbackEventSubscriberSlots := make(chan struct{}, maxPlaybackEventSubscribers)
 	handlePlaybackEvents := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		select {
+		case playbackEventSubscriberSlots <- struct{}{}:
+			defer func() { <-playbackEventSubscriberSlots }()
+		default:
+			http.Error(w, "too many playback event subscribers", http.StatusTooManyRequests)
 			return
 		}
 
@@ -1016,11 +1234,188 @@ func New(deps Dependencies) (*Server, error) {
 	mux.HandleFunc("/events/playback", handlePlaybackEvents)
 	mux.HandleFunc("/api/v1/playback/events", handlePlaybackEvents)
 
-	return &Server{handler: mux}, nil
+	return &Server{handler: limitRequestBody(authGate(deps.Auth, mux))}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	return s.handler
+}
+
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authGate(authService *auth.Service, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authService == nil || !authService.Required() || authPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if !authService.PasswordConfigured() {
+			if authSetupException(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if wantsHTML(r) {
+				http.Redirect(w, r, "/setup-admin", http.StatusSeeOther)
+				return
+			}
+			writeAuthError(w, http.StatusForbidden, "admin_password_required")
+			return
+		}
+
+		cookie, err := r.Cookie(auth.DefaultCookieName)
+		if err != nil || !authService.ValidateSession(cookie.Value) {
+			if wantsHTML(r) {
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				return
+			}
+			writeAuthError(w, http.StatusUnauthorized, "login_required")
+			return
+		}
+
+		if mutatesState(r.Method) && !sameOriginRequest(r) {
+			writeAuthError(w, http.StatusForbidden, "csrf_origin_check_failed")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authPublicPath(path string) bool {
+	if path == "/healthz" || path == "/setup-admin" || path == "/login" {
+		return true
+	}
+	return strings.HasPrefix(path, "/static/")
+}
+
+func authSetupException(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch r.URL.Path {
+	case "/provisioning-status", "/api/v1/provisioning/status":
+		return true
+	default:
+		return false
+	}
+}
+
+func mutatesState(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func sameOriginRequest(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		return originMatchesHost(origin, r.Host)
+	}
+	if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+		return originMatchesHost(referer, r.Host)
+	}
+	return false
+}
+
+func originMatchesHost(rawURL, host string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, host)
+}
+
+func wantsHTML(r *http.Request) bool {
+	if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/") {
+		return true
+	}
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "text/html")
+}
+
+func writeAuthError(w http.ResponseWriter, status int, code string) {
+	_ = writeJSONStatus(w, status, map[string]string{"error": code})
+}
+
+func setSessionCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.DefaultCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int((12 * time.Hour).Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.DefaultCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func renderAuthForm(w http.ResponseWriter, title, action, buttonLabel, errorMessage string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	errorBlock := ""
+	if errorMessage != "" {
+		errorBlock = fmt.Sprintf(`<p class="error">%s</p>`, template.HTMLEscapeString(errorMessage))
+	}
+	confirmField := ""
+	if action == "/setup-admin" {
+		confirmField = `<label>确认密码<input type="password" name="confirm_password" autocomplete="new-password" required minlength="8"></label>`
+	}
+	_, _ = fmt.Fprintf(w, `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#faf6f1;color:#2e2a27}
+main{width:min(360px,calc(100vw - 32px));padding:24px;border:1px solid #e7d8cb;border-radius:8px;background:#fffdf9;box-shadow:0 12px 36px rgba(70,50,35,.12)}
+h1{margin:0 0 18px;font-size:24px;letter-spacing:0}
+form{display:grid;gap:14px}
+label{display:grid;gap:6px;font-weight:600}
+input{font:inherit;padding:12px;border:1px solid #d8c8bc;border-radius:6px;background:#fff}
+button{font:inherit;font-weight:700;padding:12px;border:0;border-radius:6px;background:#d9784e;color:#fff}
+.error{padding:10px 12px;border-radius:6px;background:#f9e1dc;color:#8d2d1e}
+</style>
+</head>
+<body>
+<main>
+<h1>%s</h1>
+%s
+<form method="post" action="%s">
+<label>管理密码<input type="password" name="password" autocomplete="current-password" required minlength="8"></label>
+%s
+<button type="submit">%s</button>
+</form>
+</main>
+</body>
+</html>`,
+		template.HTMLEscapeString(title),
+		template.HTMLEscapeString(title),
+		errorBlock,
+		template.HTMLEscapeString(action),
+		confirmField,
+		template.HTMLEscapeString(buttonLabel),
+	)
 }
 
 func decodePlaybackCommandRequest(r *http.Request) (playbackCommandRequest, error) {
@@ -1037,6 +1432,59 @@ func decodePlaybackCommandRequest(r *http.Request) (playbackCommandRequest, erro
 	}
 
 	return request, nil
+}
+
+func decodeSettingsUpdateRequest(r *http.Request) (settingsUpdateRequest, error) {
+	var request settingsUpdateRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return request, fmt.Errorf("decode settings update request: %w", err)
+	}
+	trimStringPtr := func(value *string) *string {
+		if value == nil {
+			return nil
+		}
+		trimmed := strings.TrimSpace(*value)
+		return &trimmed
+	}
+	request.Mode = trimStringPtr(request.Mode)
+	request.InterfaceMode = trimStringPtr(request.InterfaceMode)
+	request.DSDPolicy = trimStringPtr(request.DSDPolicy)
+	return request, nil
+}
+
+func applySettingsUpdateRequest(current settings.Config, request settingsUpdateRequest) settings.Config {
+	next := current
+	if request.Mode != nil {
+		next.Mode = *request.Mode
+	}
+	if request.InterfaceMode != nil {
+		next.InterfaceMode = *request.InterfaceMode
+	}
+	if request.DSDPolicy != nil {
+		next.DSDPolicy = *request.DSDPolicy
+	}
+	if request.SSHEnabled != nil {
+		next.SSHEnabled = *request.SSHEnabled
+	}
+	return settings.Normalize(next)
+}
+
+func requestSystemReboot(ctx context.Context) (string, error) {
+	commandLine := strings.TrimSpace(os.Getenv("CONTROLD_REBOOT_COMMAND"))
+	if commandLine == "" {
+		return "reboot required; CONTROLD_REBOOT_COMMAND is not configured, so no reboot was executed", nil
+	}
+	fields := strings.Fields(commandLine)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("CONTROLD_REBOOT_COMMAND is empty")
+	}
+	command := exec.CommandContext(ctx, fields[0], fields[1:]...)
+	if output, err := command.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("run reboot command: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return "reboot command accepted", nil
 }
 
 func decodeLibraryCommandRequest(r *http.Request) (libraryCommandRequest, error) {
@@ -1763,17 +2211,20 @@ func validateRemoteTrackIDList(raw string) error {
 	if raw == "" {
 		return nil
 	}
-	if err := rejectAbsolutePlaybackTarget(raw); err != nil {
-		return err
-	}
 
 	var trackIDs []string
 	if err := json.Unmarshal([]byte(raw), &trackIDs); err != nil {
 		return fmt.Errorf("invalid track id list: %w", err)
 	}
+	if len(trackIDs) > maxLibraryPlaybackCandidateTrackIDs {
+		return fmt.Errorf("too_many_track_ids: max=%d", maxLibraryPlaybackCandidateTrackIDs)
+	}
 	for _, trackID := range trackIDs {
 		if err := rejectAbsolutePlaybackTarget(trackID); err != nil {
 			return err
+		}
+		if len([]byte(strings.TrimSpace(trackID))) > maxRemoteTrackIDBytes {
+			return fmt.Errorf("track_id_too_long: max=%d", maxRemoteTrackIDBytes)
 		}
 	}
 
@@ -1781,6 +2232,9 @@ func validateRemoteTrackIDList(raw string) error {
 }
 
 func rejectAbsolutePlaybackTarget(trackID string) error {
+	if len([]byte(strings.TrimSpace(trackID))) > maxRemoteTrackIDBytes {
+		return fmt.Errorf("track_id_too_long: max=%d", maxRemoteTrackIDBytes)
+	}
 	if isAbsolutePlaybackTarget(trackID) {
 		return fmt.Errorf("absolute_path_playback_forbidden")
 	}
@@ -1812,7 +2266,7 @@ func trackIDsFromPlaybackContext(snapshot libraryclient.Snapshot, startTrackID s
 		return nil, fmt.Errorf("unsupported_format_in_library_ui")
 	}
 
-	trackIDs := make([]string, 0, len(snapshot.Tracks)-startIndex)
+	trackIDs := make([]string, 0, min(len(snapshot.Tracks)-startIndex, maxLibraryPlaybackCandidateTrackIDs))
 	for _, track := range snapshot.Tracks[startIndex:] {
 		if supported, _ := trackPlaybackSupport(track); !supported {
 			continue
@@ -1821,6 +2275,9 @@ func trackIDsFromPlaybackContext(snapshot libraryclient.Snapshot, startTrackID s
 			return nil, err
 		}
 		trackIDs = append(trackIDs, track.TrackUID)
+		if len(trackIDs) >= maxLibraryPlaybackCandidateTrackIDs {
+			break
+		}
 	}
 	if len(trackIDs) == 0 {
 		return nil, fmt.Errorf("no_playable_tracks_in_context")

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/lumelo/controld/internal/api"
 	"github.com/lumelo/controld/internal/audiodevice"
@@ -26,6 +27,7 @@ func main() {
 		log.Printf("load controld config %s: %v; using defaults", configPath, err)
 		cfg = settings.Default()
 		cfg.ConfigPath = configPath
+		cfg.Warning = err.Error()
 	}
 	runtimeDir := getenvWithFallbacks([]string{"LUMELO_RUNTIME_DIR", "PRODUCT_RUNTIME_DIR"}, "/run/lumelo")
 	stateDir := getenvWithFallbacks([]string{"LUMELO_STATE_DIR", "PRODUCT_STATE_DIR"}, "/var/lib/lumelo")
@@ -39,9 +41,15 @@ func main() {
 	provisioningStatusPath := getenv("CONTROLD_PROVISIONING_STATUS_PATH", filepath.Join(runtimeDir, "provisioning-status.json"))
 	alsaCardsPath := getenv("CONTROLD_ALSA_CARDS_PATH", "")
 	mediaImportCommand := getenv("CONTROLD_MEDIA_IMPORT_BIN", "lumelo-media-import")
+	authStatePath := getenv("CONTROLD_AUTH_STATE_PATH", filepath.Join(stateDir, "auth.json"))
+	sshApplyCommand := getenv("CONTROLD_SSH_APPLY_COMMAND", "")
+	authService, err := auth.NewFileService(authStatePath)
+	if err != nil {
+		log.Fatalf("load auth state: %v", err)
+	}
 
 	server, err := api.New(api.Dependencies{
-		Auth:             auth.NewService(false),
+		Auth:             authService,
 		Playback:         playbackclient.New(commandSocket, eventSocket),
 		Library:          libraryclient.New(libraryDBPath),
 		MediaImport:      mediaimport.New(mediaImportCommand, libraryDBPath),
@@ -49,7 +57,7 @@ func main() {
 		Provisioning:     provisioningclient.New(provisioningStatusPath),
 		AudioOutput:      audiodevice.New(alsaCardsPath),
 		Settings:         cfg,
-		SSH:              sshctl.NewController(cfg.SSHEnabled),
+		SSH:              sshctl.NewControllerWithCommand(cfg.SSHEnabled, sshApplyCommand),
 		Templates:        web.Assets,
 		Static:           web.Assets,
 		ArtworkCacheRoot: artworkCacheRoot,
@@ -61,7 +69,15 @@ func main() {
 	addr := getenv("CONTROLD_LISTEN_ADDR", ":8080")
 	log.Printf("lumelo controld listening on %s", addr)
 
-	if err := http.ListenAndServe(addr, server.Handler()); err != nil {
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("serve controld: %v", err)
 	}
 }

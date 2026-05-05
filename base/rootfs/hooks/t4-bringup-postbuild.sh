@@ -44,8 +44,10 @@ rm -f "${ROOTFS_DIR}/etc/resolv.conf"
 ln -sf /run/systemd/resolve/resolv.conf "${ROOTFS_DIR}/etc/resolv.conf"
 
 mkdir -p "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants"
-ln -sf ../local-mode.target \
-  "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/local-mode.target"
+rm -f "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/local-mode.target"
+rm -f "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/bridge-mode.target"
+ln -sf ../lumelo-mode-manager.service \
+  "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/lumelo-mode-manager.service"
 
 if [ -n "${unit_dir}" ]; then
   for unit in systemd-networkd.service systemd-resolved.service systemd-timesyncd.service; do

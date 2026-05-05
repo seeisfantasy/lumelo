@@ -448,7 +448,7 @@ runtime 修复：
 - 设置页新增 `当前解码器` 下拉框：
   - 未发现 USB Audio 解码器时显示 `未连接`
   - 发现 USB Audio 解码器时显示解码器名称
-- 新增 [Audio_Output_Device_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Audio_Output_Device_Plan.md)，记录 V2 多解码器选择与 USB 事件监听计划。
+- V2 多解码器选择与 USB 事件监听计划已合并进 [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md) 的 `Audio Output Contract`。
 
 已验证：
 
@@ -705,7 +705,7 @@ T4 runtime 状态：
   - `audio_output_unavailable`
 - 同时发现多个 USB Audio DAC 时 fail-fast：
   - `audio_output_ambiguous`
-- [Audio_Output_Device_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Audio_Output_Device_Plan.md) 已同步 V1 运行语义。
+- [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md) 的 `Audio Output Contract` 已同步 V1 运行语义。
 
 已验证：
 
@@ -1284,3 +1284,452 @@ T4 runtime 状态：
 
 - 用户判断正确：旧实现确实把外部介质判断写得太窄，只覆盖 USB 读卡器路径，没有覆盖 T4 direct TF slot。
 - 修复后 eMMC boot + direct TF slot 可识别、可扫描，曲库已入库 `24` 张专辑、`184` 首歌曲。
+
+### 5.31 2026-05-05：M1 修复队列建立，并启动 WebUI auth P0
+
+本轮目标：
+
+- 把当前 M1 未闭环项整理成可执行修复队列。
+- 从 `REQ-P0-001 / BUG-P0-002` 开始修：
+  - WebUI auth
+  - first password setup
+  - session cookie
+  - sensitive route login gate
+  - state-changing POST same-origin check
+
+已修改：
+
+- [Milestone_Progress_Document.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Milestone_Progress_Document.md)
+  - 新增 `当前 M1 修复队列`。
+  - 更新 `REQ-P0-001` 当前状态。
+- `services/controld/internal/auth`
+  - 从 placeholder `passwordConfigured bool` 扩展为 file-backed auth service。
+  - auth state 默认写入 `/var/lib/lumelo/auth.json`。
+  - password hash 使用 `pbkdf2-hmac-sha256`，schema 带 version / algorithm / iterations。
+  - auth state 采用 temp file + fsync + rename + parent dir fsync。
+  - 新增 in-memory session。
+- `services/controld/cmd/controld`
+  - 正式启动改为 `auth.NewFileService(...)`，不再固定 `auth.NewService(false)`。
+  - auth state path 可通过 `CONTROLD_AUTH_STATE_PATH` 覆盖。
+- `services/controld/internal/api`
+  - 新增 `/setup-admin`。
+  - 新增 `/login`。
+  - 新增 `/logout`。
+  - 增加 auth gate：
+    - `/healthz` 匿名。
+    - 未设置管理员密码时，普通 WebUI 跳转 `/setup-admin`。
+    - 未登录访问 API 返回 `401 / 403`。
+    - password configured 后，页面 / API / logs / commands 默认需要 session。
+    - state-changing POST、`/setup-admin` POST、`/login` POST 必须通过 same-origin `Origin / Referer` 检查。
+    - first setup 阶段允许只读 `/provisioning-status` 和 `/api/v1/provisioning/status`，保留配网后诊断入口。
+
+已验证：
+
+- `go test ./...` in `services/controld`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机手动验证：
+  - first setup 页面
+  - login / logout
+  - 未登录 API 拒绝
+  - 浏览器 same-origin POST
+  - APK / provisioning setup 阶段访问 `/provisioning-status`
+- 尚未补：
+  - login failure rate limit
+  - physical recovery marker / `auth-recovery.service`
+
+### 5.32 2026-05-05：实现 P0 mode manager 最小启动闭环
+
+本轮继续修 M1 队列第二条：
+
+- `REQ-P0-004：mode manager 最小闭环`
+
+已修改：
+
+- 新增 `base/rootfs/overlay/usr/libexec/lumelo/mode-manager`。
+  - 读取 `/etc/lumelo/config.toml`。
+  - 缺失或非法 mode 时回退 `local`。
+  - `mode=local` 启动 `local-mode.target`。
+  - `mode=bridge` 启动 V1 `bridge-mode.target` placeholder。
+  - 不做 runtime isolate，只在启动期 `systemctl start --no-block <target>`。
+- 新增 `lumelo-mode-manager.service`。
+  - 由 `multi-user.target` 启用。
+- `t4-bringup-postbuild.sh` 和 `build-t4-smoke-image.sh`：
+  - 不再静态启用 `local-mode.target`。
+  - 改为启用 `lumelo-mode-manager.service`。
+- `bridge-mode.target`：
+  - 现在保留 `auth-recovery.service` 和 `controld.service`。
+- `controld.service`：
+  - 移除 `Requires=playbackd.service`。
+  - 允许 bridge placeholder 中保留 WebUI / settings / healthz 回退入口。
+- `verify-t4-lumelo-rootfs-image.sh`：
+  - 增加 mode manager unit / helper / enablement 检查。
+  - 增加 bridge target 保留 `controld.service` 检查。
+
+已验证：
+
+- `sh -n base/rootfs/overlay/usr/libexec/lumelo/mode-manager`
+- `go test ./...` in `services/controld` 仍通过。
+- `git diff --check`
+- `git diff --cached --check`
+
+尚未验证：
+
+- 尚未 build 新 image 后跑 `verify-t4-lumelo-rootfs-image.sh`。
+- 尚未 live T4 runtime update。
+- 尚未真机验证：
+  - `mode=local` boot 后启动 playback stack。
+  - `mode=bridge` boot 后只启动 placeholder / `controld`，不启动 `playbackd` / `sessiond`。
+  - bridge placeholder 下 WebUI 能切回 local。
+- 设置页保存 mode、确认 reboot、取消不写 committed config 仍归入 `REQ-P1-003 settings 写入 / pending reboot`。
+
+### 5.33 2026-05-05：修复 `PLAYBACK_STARTED` first-frame 事件语义
+
+本轮继续修 M1 队列第三条：
+
+- `REQ-P0-002：修正 playback event timing`
+- `BUG-P0-001：PLAYBACK_STARTED 早发`
+
+已修改：
+
+- `playbackd` command outcome：
+  - `Play`
+  - `QueuePlay`
+  - `PlayHistory`
+  现在只发 `PLAY_REQUEST_ACCEPTED`，并把 runtime state 置为 `pre_quiet`。
+- `derive_output_action()`：
+  - 改为由 `PLAY_REQUEST_ACCEPTED` 启动输出。
+  - `PLAYBACK_STARTED` 不再作为启动输出的触发源。
+- output streaming path：
+  - 新增 first-frame notifier。
+  - 第一次成功写入音频 payload 后：
+    - runtime state 从 `pre_quiet` 转为 `quiet_active`
+    - 广播 `PLAYBACK_STARTED`
+- WAV transport：
+  - 不再使用 direct `aplay file.wav`。
+  - 改为 `aplay -t wav -` pipe transport。
+  - 先写 WAV header，首次写入 data payload 后才触发 `PLAYBACK_STARTED`。
+- decoded PCM / DSD transport：
+  - 在第一次成功 `write_all` PCM / DSD payload 后才触发 `PLAYBACK_STARTED`。
+- output / content failure：
+  - `pre_quiet` 阶段失败也会进入对应失败状态，不再卡在 `pre_quiet`。
+
+已验证：
+
+- `cargo fmt`
+- `cargo test -p playbackd`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机 ALSA 验证 WAV / FLAC / DSD 的 `PLAYBACK_STARTED` 时机。
+- 尚未验证 WebUI 在 `pre_quiet -> quiet_active` 之间的实际显示。
+
+### 5.34 2026-05-05：修复 `sessiond` Quiet Mode 服务切换闭环
+
+本轮继续修 M1 队列第四条：
+
+- `REQ-P0-003：Quiet Mode 服务切换闭环`
+- `BUG-P0-003：sessiond 未执行 freezable services`
+- `REQ-P0-007：Quiet Mode active 抑制 mDNS/DNS-SD`
+
+已修改：
+
+- `sessiond`：
+  - `SESSIOND_FREEZABLE_SERVICES` 现在真实加入 Quiet Mode stop set。
+  - 进入 Quiet Mode 前记录 `QuietReconcileSnapshot`。
+  - 退出 Quiet Mode 时只恢复进入前 `active` 的 unit，不再无条件 start `SESSIOND_QUIET_START_UNITS`。
+  - protected units 如果被放进 stop / start / freezable 列表会 fail-fast。
+  - `error_hold` 现在保持 Quiet service mode，避免内容错误 hold 期间恢复后台服务。
+  - 新增 `SESSIOND_QUIET_MDNS_INTERFACES`，默认 rootfs 配置为 `auto`。
+  - Quiet Mode 进入时通过 `resolvectl mdns <iface> no` 抑制 mDNS/DNS-SD，退出时按 snapshot 恢复。
+- `sessiond.env`：
+  - protected list 加入 `playbackd.service`、`sessiond.service`、`systemd-resolved.service`。
+  - freezable list 加入 `media-indexd.service`、`lumelo-media-reconcile.service`。
+  - mDNS suppression 配置为 `SESSIOND_QUIET_MDNS_INTERFACES="auto"`。
+
+已验证：
+
+- `cargo fmt`
+- `cargo test -p sessiond`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机验证播放中 unit 状态：
+  - `lumelo-wifi-provisiond.service`
+  - `lumelo-bluetooth-provisioning.service`
+  - `media-indexd.service`
+- 尚未真机验证 `resolvectl mdns <iface>` Quiet Mode 期间变为 `no`，停止后恢复。
+
+### 5.35 2026-05-05：实现 Android APK `.local` resolver probe
+
+本轮继续修 M1 队列第五条：
+
+- `REQ-P0-008：Android APK .local resolver / WebView probe`
+
+已修改：
+
+- `apps/android-provisioning`：
+  - 配网状态进入 `connected` 后，不再直接把 IP URL 当作唯一默认入口。
+  - APK 先用短超时真实请求 `http://lumelo.local/healthz`。
+  - probe 成功：
+    - 默认 WebUI 入口切到 `http://lumelo.local/`
+    - 自动打开 WebView 时也使用 `.local`
+  - probe 失败：
+    - 自动回退到 provisioning status / `device_info` 返回的 IP URL。
+  - 最近一次 probe 结果写入 SharedPreferences：
+    - diagnostics 展示 `lumelo.local supported: yes/no/unknown`
+  - 现有 `NsdManager` / DNS-SD 仍未作为判断依据；判断依据是 WebView 同等路径能否真实 HTTP 访问 `/healthz`。
+
+已验证：
+
+- 静态检查了 `connected -> probe -> selected URL -> WebView` 代码路径。
+
+未通过验证：
+
+- `./gradlew :app:assembleDebug`
+  - 当前 Mac 环境缺 Java Runtime，Gradle 无法启动。
+
+尚未验证：
+
+- 尚未构建新版 APK。
+- 尚未安装到手机。
+- 尚未真机验证：
+  - 支持 `.local` 的 Android 机型默认打开 `http://lumelo.local/`
+  - 不支持 `.local` 的 Android 机型自动打开 `http://<T4_IP>/`
+
+### 5.36 2026-05-05：修复内容错误 `quiet_error_hold` auto-skip 状态机
+
+本轮继续修 M1 队列第六条：
+
+- `REQ-P1-002：内容错误恢复状态机`
+- `BUG-P1-005：内容错误 auto-skip 未实现`
+- `BUG-P1-007：失败或秒切路径可能污染 history`
+
+已修改：
+
+- `playbackd`：
+  - content keep-quiet failure 进入 `quiet_error_hold`。
+  - 进入 `quiet_error_hold` 后由 `playbackd` 内部启动 6 秒 timer。
+  - timer 到期后自动推进下一首，并以 `pre_quiet -> first frame -> quiet_active` 路径启动下一首。
+  - 任一用户显式控制命令会取消 pending auto-skip。
+  - 连续 content auto-skip 上限为 3，超过后停止并退出 Quiet Mode。
+  - 失败曲目会从 recent history 回滚，避免坏文件 / 秒切路径污染播放历史。
+- `sessiond` 已在上一轮把 `error_hold` 纳入 Quiet service mode，因此 content error hold 期间不会恢复 provisioning / media worker。
+
+已验证：
+
+- `cargo fmt`
+- `cargo test -p playbackd`
+  - `content_error_auto_skip_advances_and_does_not_keep_failed_track_history`
+  - `content_error_auto_skip_stops_after_consecutive_limit`
+  - 既有 failure rollback tests 通过
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未用真实坏文件验证 WebUI / sessiond / playbackd 联动。
+- `PLAYBACK_FAILED` 的 `auto_skip_after_ms` / `queue_entry_id` 扩展字段仍未补齐。
+
+### 5.37 2026-05-05：实现 settings 写入 / pending reboot API 最小闭环
+
+本轮继续修 M1 队列第七条：
+
+- `REQ-P1-003：设置系统写入和重启生效契约`
+
+已修改：
+
+- `services/controld/internal/settings`：
+  - 新增 `Validate`
+  - 新增 `Normalize`
+  - 新增 `RequiresReboot`
+  - 新增 `SaveAtomic`
+    - temp file
+    - fsync file
+    - rename
+    - fsync parent dir
+  - 新增 in-memory `Store`
+- `controld` API：
+  - `GET /api/v1/settings`
+  - `POST /api/v1/settings`
+    - 默认 validate-only，不写 committed config
+    - `commit=true` 才 atomic 写入 `config.toml`
+    - `mode` / `interface_mode` / `dsd_output_policy` 变更返回 `requires_reboot=true`
+  - `POST /api/v1/system/reboot-request`
+    - 默认只返回 reboot required，不执行真实 reboot
+    - 只有设置 `CONTROLD_REBOOT_COMMAND` 时才执行外部 reboot command
+- `sshctl`：
+  - 新增 `SetEnabled`，当前先同步内存状态。
+
+已验证：
+
+- `go test ./...` in `services/controld`
+  - validate-only 不落盘。
+  - `commit=true` 写入 config。
+  - committed config 可被 `settings.Load()` 读回。
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 设置页 UI 表单尚未接入。
+- `ssh_enabled` 尚未通过特权 helper 调 systemd enable/disable SSH unit。
+- config parse failure warning 尚未展示到 UI。
+
+### 5.38 2026-05-05：补 media offline 最小状态分类
+
+本轮继续修 M1 队列第八条：
+
+- `REQ-P1-006：media offline 状态机`
+
+已修改：
+
+- `ipc-proto`：
+  - 新增 `PlaybackFailureClass::MediaOffline`
+  - `PLAYBACK_FAILED class=media_offline` 可 round-trip
+- `playbackd`：
+  - `track_volume_unavailable` 归类为 `media_offline`
+  - `track_file_missing` 归类为 `media_offline`
+  - `media_offline` fail-stop，不进入 content auto-skip
+  - `media_offline` 不保持 Quiet Mode
+- `sessiond`：
+  - 现有 `keep_quiet=false` 路径会退出 Quiet service mode，无需额外参与播放决策。
+
+已验证：
+
+- `cargo fmt`
+- `cargo test -p ipc-proto -p playbackd -p sessiond`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机拔 TF / USB 验证离线曲目 fail-stop。
+- WebUI offline badge / 明确错误展示尚未补齐。
+- RAM Window design lock 后仍需定义“已缓存 current/next”介质离线行为。
+
+### 5.39 2026-05-05：锁定 RAM Window Playback M2 MVP 设计
+
+本轮继续修 M1 队列第九条：
+
+- `REQ-P1-007：RAM Window Playback design lock`
+
+已锁定：
+
+- M2 MVP 缓存 raw file bytes，不缓存 decoded PCM。
+- M2 MVP window 范围为 `current + next`；`prev/current/next` 放后续 release hardening。
+- 默认总预算 512 MiB，单曲默认上限 256 MiB。
+- 超过单曲上限时显式 `streaming_fallback`，但不得回到 direct `aplay <path>`。
+- DSD raw file 可进入 RAM Window，Native DSD / DoP 仍由 DSD planner 决定。
+- media offline 行为：
+  - current 已完整驻留 RAM 时可继续播放。
+  - next 已完整驻留 RAM 时可继续下一首。
+  - 未驻留 RAM 的离线曲目 fail-stop 为 `media_offline`。
+- `PLAYBACK_STARTED` 仍以第一帧写入 transport 后为准；RAM preload 完成不等于 playback started。
+
+M2 MVP 边界：
+
+- 新增 `playbackd::ram_window` 模块。
+- source kind 初版只做：
+  - `RamBytes`
+  - `StreamingFallback`
+- `current` 同步准备，`next` 后台准备。
+- status / diagnostics 后续需要暴露 current/next residency。
+
+尚未实现：
+
+- RAM Window runtime module 尚未编码。
+- RAM Window diagnostics / WebUI 展示尚未实现。
+
+### 5.40 2026-05-05：补 M1 最低 runtime 权限边界
+
+本轮继续修 M1 队列第十条：
+
+- `REQ-P1-008：最低 runtime 权限边界`
+
+已修改：
+
+- `controld`：
+  - HTTP server 改为显式 `http.Server`
+  - 增加：
+    - `ReadHeaderTimeout=5s`
+    - `ReadTimeout=15s`
+    - `WriteTimeout=30s`
+    - `IdleTimeout=60s`
+  - mutating request body 默认限制为 1 MiB。
+  - SSE playback event subscribers 限制为 8。
+- `playbackd`：
+  - socket dir 创建后 chmod `0750`
+  - command / event UDS socket chmod `0660`
+  - event subscribers 限制为 16。
+- rootfs：
+  - 新增 `/etc/tmpfiles.d/lumelo.conf`
+  - 声明 `/run/lumelo`、`/var/lib/lumelo`、`/var/cache/lumelo`、`/var/cache/lumelo/artwork` 为 `0750 root root`。
+
+已验证：
+
+- `go test ./...` in `services/controld`
+- `cargo fmt`
+- `cargo test -p playbackd`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未离线 image verify tmpfiles / UDS 权限。
+- `User=lumelo`、`ProtectSystem`、`NoNewPrivileges` 等完整 hardening 仍留后续。
+
+### 5.41 2026-05-05：继续收口 M1 P0/P1 bug 池
+
+本轮按 M1 队列继续清 P0/P1，不等逐条确认。
+
+已修改：
+
+- `auth-recovery`：
+  - `/usr/libexec/lumelo/auth-recovery` 从 placeholder 改为真实 physical marker reset。
+  - 默认扫描 `/media:/mnt` 下挂载根目录的 `RESET_ADMIN_PASSWORD`。
+  - 命中后删除 `/var/lib/lumelo/auth.json`，写 `/run/lumelo/auth-recovery.json`，下次由 `controld` 进入 first setup。
+- `controld auth`：
+  - 登录失败超过 5 次后锁定 1 分钟。
+- `settings` / 设置页：
+  - `/provisioning` 设置页接入 mode / interface / DSD / SSH 表单。
+  - 采用 validate -> confirm -> commit；需要重启的设置确认后才写 committed config。
+  - config parse warning 已展示到首页 summary 和设置页。
+  - `ssh_enabled` commit 时通过 `/usr/libexec/lumelo/ssh-apply` 调 systemd enable/disable SSH unit。
+- `controld` 控制面边界：
+  - library play candidate list 限制为 500。
+  - remote track id 限制为 512 bytes。
+  - `playbackclient` UDS command line 限制为 64 KiB。
+- `playbackd`：
+  - UDS command line 限制为 64 KiB。
+  - queue/history state 读取限制为 1 MiB。
+  - queue/history 持久化补 `fsync(parent directory)`。
+  - history write 从 command-accepted 收紧到 first-frame notifier，失败、秒切、坏文件 auto-skip 不再污染播放历史。
+- `ipc-proto` / playback event：
+  - `PLAYBACK_FAILED` 补 `auto_skip_after_ms` 和 `queue_entry_id` 扩展字段。
+  - `controld` playback event parser 同步透传这两个字段。
+- `libraryclient`：
+  - directory filter 的 `LIKE` 增加 escape，避免 `%` / `_` 路径误匹配。
+- WebUI：
+  - `library.html` 和 `index.html` 清掉动态 `innerHTML` 拼接，改用 `textContent` / `replaceChildren` / `document.createElement`。
+- rootfs / image：
+  - `local-mode.target` 不再直接 Wants `media-indexd.service`。
+  - overlay rsync 排除 `__pycache__/`、`*.pyc`、`.DS_Store`、`.pytest_cache/`、`*~`。
+  - 清理 overlay 下已有 host-only artifacts。
+  - core service `RuntimeDirectoryMode` / `StateDirectoryMode` 收紧到 `0750`。
+  - verify 脚本增加 tmpfiles、runtime mode、auth recovery、SSH helper、media-indexd on-demand 检查。
+
+已验证：
+
+- `go test ./...` in `services/controld`
+- `cargo fmt`
+- `cargo test -p playbackd`
+- `auth-recovery` 本地 marker reset smoke
+- `JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ./gradlew :app:assembleDebug` in `apps/android-provisioning`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机验证 first setup / login / recovery marker / settings reboot flow。
+- Android APK `.local` probe 已完成 debug build，尚未安装到手机实测。
+- 完整 non-root service / systemd hardening 仍留 M3。

@@ -1,8 +1,5 @@
 [Unit]
 Description=Lumelo Bridge Mode Placeholder Target
-Wants=auth-recovery.service
-After=auth-recovery.service
+Wants=auth-recovery.service controld.service
+After=auth-recovery.service controld.service
 AllowIsolate=yes
-
-[Install]
-WantedBy=multi-user.target

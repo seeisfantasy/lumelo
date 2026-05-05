@@ -8,6 +8,7 @@ import (
 	"github.com/lumelo/controld/internal/mediaimport"
 	"github.com/lumelo/controld/internal/playbackclient"
 	"github.com/lumelo/controld/internal/provisioningclient"
+	"github.com/lumelo/controld/internal/settings"
 )
 
 type systemSummaryView struct {
@@ -20,7 +21,40 @@ type systemSummaryView struct {
 	EventSocket        string `json:"event_socket"`
 	LibraryDBPath      string `json:"library_db_path"`
 	ConfigPath         string `json:"config_path"`
+	ConfigWarning      string `json:"config_warning,omitempty"`
 	AudioOutputPath    string `json:"audio_output_path"`
+}
+
+type settingsView struct {
+	Mode           string `json:"mode"`
+	InterfaceMode  string `json:"interface_mode"`
+	DSDPolicy      string `json:"dsd_output_policy"`
+	SSHEnabled     bool   `json:"ssh_enabled"`
+	ConfigPath     string `json:"config_path"`
+	ConfigWarning  string `json:"config_warning,omitempty"`
+	RequiresReboot bool   `json:"requires_reboot"`
+}
+
+type settingsUpdateRequest struct {
+	Mode          *string `json:"mode"`
+	InterfaceMode *string `json:"interface_mode"`
+	DSDPolicy     *string `json:"dsd_output_policy"`
+	SSHEnabled    *bool   `json:"ssh_enabled"`
+	Commit        bool    `json:"commit"`
+}
+
+type settingsUpdateResponse struct {
+	OK             bool         `json:"ok"`
+	Committed      bool         `json:"committed"`
+	RequiresReboot bool         `json:"requires_reboot"`
+	Settings       settingsView `json:"settings"`
+	Error          string       `json:"error,omitempty"`
+}
+
+type rebootRequestResponse struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
 }
 
 type playbackStatusView struct {
@@ -204,7 +238,20 @@ func buildSystemSummaryView(deps Dependencies, provisioning provisioningclient.S
 		EventSocket:        deps.Playback.EventSocket,
 		LibraryDBPath:      deps.Library.LibraryDBPath,
 		ConfigPath:         deps.Settings.ConfigPath,
+		ConfigWarning:      deps.Settings.Warning,
 		AudioOutputPath:    "/api/v1/system/audio-output",
+	}
+}
+
+func buildSettingsView(cfg settings.Config, requiresReboot bool) settingsView {
+	return settingsView{
+		Mode:           cfg.Mode,
+		InterfaceMode:  cfg.InterfaceMode,
+		DSDPolicy:      cfg.DSDPolicy,
+		SSHEnabled:     cfg.SSHEnabled,
+		ConfigPath:     cfg.ConfigPath,
+		ConfigWarning:  cfg.Warning,
+		RequiresReboot: requiresReboot,
 	}
 }
 

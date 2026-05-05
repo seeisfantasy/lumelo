@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -41,6 +42,24 @@ func TestTrackIDsFromPlaybackContextRejectsAbsoluteTrackUIDs(t *testing.T) {
 	_, err := trackIDsFromPlaybackContext(snapshot, "track-a")
 	if err == nil || !strings.Contains(err.Error(), "absolute_path_playback_forbidden") {
 		t.Fatalf("expected absolute path rejection, got %v", err)
+	}
+}
+
+func TestTrackIDsFromPlaybackContextCapsCandidateList(t *testing.T) {
+	tracks := make([]libraryclient.TrackSummary, 0, maxLibraryPlaybackCandidateTrackIDs+25)
+	for index := range maxLibraryPlaybackCandidateTrackIDs + 25 {
+		tracks = append(tracks, libraryclient.TrackSummary{TrackUID: fmt.Sprintf("track-%03d", index)})
+	}
+
+	trackIDs, err := trackIDsFromPlaybackContext(libraryclient.Snapshot{Tracks: tracks}, "track-000")
+	if err != nil {
+		t.Fatalf("trackIDsFromPlaybackContext: %v", err)
+	}
+	if len(trackIDs) != maxLibraryPlaybackCandidateTrackIDs {
+		t.Fatalf("unexpected candidate count: got %d want %d", len(trackIDs), maxLibraryPlaybackCandidateTrackIDs)
+	}
+	if trackIDs[len(trackIDs)-1] != "track-499" {
+		t.Fatalf("unexpected final candidate: %s", trackIDs[len(trackIDs)-1])
 	}
 }
 

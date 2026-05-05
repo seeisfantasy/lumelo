@@ -475,6 +475,10 @@
             <dt>配置文件</dt>
             <dd id="defaults-config-path">{{.ConfigPath}}</dd>
           </div>
+          <div id="defaults-config-warning-row" {{if not .ConfigWarning}}hidden{{end}}>
+            <dt>配置告警</dt>
+            <dd id="defaults-config-warning">{{.ConfigWarning}}</dd>
+          </div>
           <div>
             <dt>SSID</dt>
             <dd id="provisioning-ssid">{{if .Provisioning.SSID}}{{.Provisioning.SSID}}{{else}}-{{end}}</dd>
@@ -695,12 +699,12 @@
           node.textContent = textValue(value, fallback);
         };
 
-        const setHTML = (id, value) => {
+        const setHidden = (id, hidden) => {
           const node = document.getElementById(id);
           if (!node) {
             return;
           }
-          node.innerHTML = value;
+          node.hidden = hidden;
         };
 
         const setPill = (id, className, label) => {
@@ -1034,6 +1038,8 @@
           setText("defaults-password-configured", boolLabel(payload.password_configured, "已设置", "未设置"));
           setText("defaults-ssh-enabled", boolLabel(payload.ssh_enabled));
           setText("defaults-config-path", payload.config_path);
+          setText("defaults-config-warning", payload.config_warning);
+          setHidden("defaults-config-warning-row", !payload.config_warning);
           setText("defaults-command-socket", payload.command_socket);
           setText("defaults-event-socket", payload.event_socket);
           setText("defaults-library-db", payload.library_db_path);
@@ -1093,7 +1099,7 @@
           setText("playback-queue-entries", payload.queue_entries ?? 0, "0");
           setText("home-overview-state", playbackStateLabel(payload.state), "未知状态");
           setText("home-overview-track", payload.current_track, "还没有加入歌曲");
-          setHTML(
+          setText(
             "playback-engine-summary",
             `${playbackStateLabel(payload.state)} · ${orderModeLabel(payload.order_mode)} · ${repeatModeLabel(payload.repeat_mode)}`
           );

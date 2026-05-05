@@ -12,7 +12,7 @@ ExecStopPost=/usr/libexec/lumelo/classic-bluetooth-wifi-provisiond --cleanup-sdp
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=lumelo
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 
 [Install]

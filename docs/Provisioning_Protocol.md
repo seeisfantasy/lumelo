@@ -3,8 +3,8 @@
 This document defines the current Bluetooth / Wi-Fi provisioning protocol between
 the T4 and the Android provisioning app.
 
-Historical product-scope notes for the first APK MVP are archived in
-[archive/Android_Provisioning_App_MVP.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Android_Provisioning_App_MVP.md).
+APK 的当前范围、状态和后续计划统一维护在
+[Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)。
 
 ## Current T4-Side Foundation
 
@@ -188,9 +188,6 @@ The WebUI home page should also expose a compact provisioning summary so the
 operator can see the latest Bluetooth / Wi-Fi state without leaving `/`.
 
 The log page remains part of the WebUI, not the mobile provisioning app.
-
-The first Android-only MVP scope is archived in
-[archive/Android_Provisioning_App_MVP.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Android_Provisioning_App_MVP.md).
 
 The current APK structure, status, and follow-up roadmap are maintained in
 [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md).

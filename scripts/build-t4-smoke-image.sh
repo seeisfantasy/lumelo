@@ -190,11 +190,17 @@ install -m 0755 "${STAGE_DIR}/bin/controld" "${ROOTFS_MOUNT}/usr/bin/controld"
 rsync -a \
   --exclude='._*' \
   --exclude='.DS_Store' \
+  --exclude='__pycache__/' \
+  --exclude='.pytest_cache/' \
+  --exclude='*.pyc' \
+  --exclude='*~' \
   "${REPO_ROOT}/base/rootfs/overlay/" "${ROOTFS_MOUNT}/"
 
 echo "==> enabling smoke services"
 mkdir -p "${ROOTFS_MOUNT}/etc/systemd/system/multi-user.target.wants"
-ln -snf ../local-mode.target "${ROOTFS_MOUNT}/etc/systemd/system/multi-user.target.wants/local-mode.target"
+rm -f "${ROOTFS_MOUNT}/etc/systemd/system/multi-user.target.wants/local-mode.target"
+rm -f "${ROOTFS_MOUNT}/etc/systemd/system/multi-user.target.wants/bridge-mode.target"
+ln -snf ../lumelo-mode-manager.service "${ROOTFS_MOUNT}/etc/systemd/system/multi-user.target.wants/lumelo-mode-manager.service"
 
 SYSTEMD_UNIT_DIR=
 if [ -d "${ROOTFS_MOUNT}/usr/lib/systemd/system" ]; then

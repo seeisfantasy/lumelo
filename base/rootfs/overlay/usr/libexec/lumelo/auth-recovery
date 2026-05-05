@@ -2,18 +2,66 @@
 set -eu
 
 marker_name="${MARKER_NAME:-RESET_ADMIN_PASSWORD}"
-scan_root="${RECOVERY_SCAN_ROOT:-/media}"
+scan_roots="${RECOVERY_SCAN_ROOTS:-${RECOVERY_SCAN_ROOT:-/media:/mnt}}"
 state_dir="${LUMELO_STATE_DIR:-${PRODUCT_STATE_DIR:-/var/lib/lumelo}}"
-config_path="${LUMELO_CONFIG_PATH:-${PRODUCT_CONFIG_PATH:-/etc/lumelo/config.toml}}"
+auth_state_path="${CONTROLD_AUTH_STATE_PATH:-${state_dir}/auth.json}"
+run_dir="${LUMELO_RUN_DIR:-/run/lumelo}"
+status_path="${AUTH_RECOVERY_STATUS_PATH:-${run_dir}/auth-recovery.json}"
 
-printf '%s\n' "auth-recovery placeholder: scan ${scan_root} for ${marker_name}" >&2
-printf '%s\n' "auth-recovery placeholder: reset credentials in ${state_dir} and keep ${config_path} intact" >&2
+write_status() {
+  result="$1"
+  marker="$2"
+  message="$3"
+  mkdir -p "${run_dir}"
+  chmod 0750 "${run_dir}" 2>/dev/null || true
+  tmp="${status_path}.$$"
+  {
+    printf '{\n'
+    printf '  "result": "%s",\n' "${result}"
+    printf '  "marker": "%s",\n' "${marker}"
+    printf '  "auth_state_path": "%s",\n' "${auth_state_path}"
+    printf '  "message": "%s"\n' "${message}"
+    printf '}\n'
+  } > "${tmp}"
+  chmod 0640 "${tmp}" 2>/dev/null || true
+  mv "${tmp}" "${status_path}"
+}
 
-# Real implementation will:
-# 1. find a FAT32 TF/USB recovery medium
-# 2. detect the exact marker file in the root directory
-# 3. clear password/session state
-# 4. disable SSH
-# 5. hand control back to controld first-boot setup
+find_marker() {
+  old_ifs="${IFS}"
+  IFS=:
+  for root in ${scan_roots}; do
+    IFS="${old_ifs}"
+    [ -d "${root}" ] || continue
+    for candidate in "${root}" "${root}"/*; do
+      [ -d "${candidate}" ] || continue
+      if [ -f "${candidate}/${marker_name}" ]; then
+        printf '%s\n' "${candidate}/${marker_name}"
+        IFS="${old_ifs}"
+        return 0
+      fi
+    done
+    IFS=:
+  done
+  IFS="${old_ifs}"
+  return 1
+}
+
+marker_path="$(find_marker || true)"
+if [ -z "${marker_path}" ]; then
+  write_status "skipped" "" "marker_not_found"
+  exit 0
+fi
+
+rm -f "${auth_state_path}"
+rm -f "${auth_state_path}".tmp "${auth_state_path}".*.tmp 2>/dev/null || true
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now ssh.service >/dev/null 2>&1 || true
+  systemctl disable --now sshd.service >/dev/null 2>&1 || true
+fi
+
+write_status "reset" "${marker_path}" "admin_auth_state_removed"
+printf '%s\n' "auth-recovery: reset admin auth state via ${marker_path}" >&2
 
 exit 0

@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+action="${1:-}"
+unit="${LUMELO_SSH_UNIT:-ssh.service}"
+
+case "${action}" in
+  enable|true|1|on)
+    exec systemctl enable --now "${unit}"
+    ;;
+  disable|false|0|off)
+    exec systemctl disable --now "${unit}"
+    ;;
+  *)
+    printf '%s\n' "usage: ssh-apply enable|disable" >&2
+    exit 2
+    ;;
+esac

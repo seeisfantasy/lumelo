@@ -408,16 +408,21 @@ func TestQuerySnapshotSupportsDirectoryFilter(t *testing.T) {
 	if _, err := db.Exec(`
 		INSERT INTO volumes (volume_uuid, label, mount_path, is_available, last_seen_at)
 		VALUES ('vol-001', 'Demo TF', '/media/demo', 1, 1710000000);
-		INSERT INTO directories (directory_id, volume_uuid, relative_path, parent_relative_path, display_name, indexed_at) VALUES
-			(1, 'vol-001', 'OST', '', 'OST', 1),
-			(2, 'vol-001', 'OST/Disc 01', 'OST', 'Disc 01', 1),
-			(3, 'vol-001', 'Classical', '', 'Classical', 1);
+			INSERT INTO directories (directory_id, volume_uuid, relative_path, parent_relative_path, display_name, indexed_at) VALUES
+				(1, 'vol-001', 'OST', '', 'OST', 1),
+				(2, 'vol-001', 'OST/Disc 01', 'OST', 'Disc 01', 1),
+				(3, 'vol-001', 'Classical', '', 'Classical', 1),
+				(4, 'vol-001', 'Jazz_100%', '', 'Jazz_100%', 1),
+				(5, 'vol-001', 'Jazz_100%/Set 01', 'Jazz_100%', 'Set 01', 1),
+				(6, 'vol-001', 'JazzA100X', '', 'JazzA100X', 1);
 		INSERT INTO albums (album_id, album_uid, album_title, album_artist, album_artist_norm, year, track_count, total_duration_ms, album_root_dir_hint, cover_ref_id, indexed_at, album_title_norm, volume_uuid, source_mode) VALUES
 			(1, 'album-001', 'Blue Room Sessions', 'Demo Artist', 'demo artist', 2024, 2, 481000, 'OST/Disc 01', NULL, 1710000100, 'blue room sessions', 'vol-001', 'tag');
 		INSERT INTO tracks (track_uid, album_id, volume_uuid, title, filename, artist, album_artist, relative_path, track_no, disc_no, format, duration_ms, sample_rate, indexed_at) VALUES
-			('track-001', 1, 'vol-001', 'Opening', '01-opening.flac', 'Demo Artist', 'Demo Artist', 'OST/Disc 01/01-opening.flac', 1, 1, 'flac', 201000, 44100, 1710000101),
-			('track-002', 1, 'vol-001', 'Night Signal', '02-night-signal.flac', 'Demo Artist', 'Demo Artist', 'OST/Disc 01/02-night-signal.flac', 2, 1, 'flac', 280000, 44100, 1710000102),
-			('track-003', 1, 'vol-001', 'Other', '03-other.flac', 'Demo Artist', 'Demo Artist', 'Classical/03-other.flac', 3, 1, 'flac', 111000, 44100, 1710000103);
+				('track-001', 1, 'vol-001', 'Opening', '01-opening.flac', 'Demo Artist', 'Demo Artist', 'OST/Disc 01/01-opening.flac', 1, 1, 'flac', 201000, 44100, 1710000101),
+				('track-002', 1, 'vol-001', 'Night Signal', '02-night-signal.flac', 'Demo Artist', 'Demo Artist', 'OST/Disc 01/02-night-signal.flac', 2, 1, 'flac', 280000, 44100, 1710000102),
+				('track-003', 1, 'vol-001', 'Other', '03-other.flac', 'Demo Artist', 'Demo Artist', 'Classical/03-other.flac', 3, 1, 'flac', 111000, 44100, 1710000103),
+				('track-004', 1, 'vol-001', 'Literal Percent', '04-literal.flac', 'Demo Artist', 'Demo Artist', 'Jazz_100%/Set 01/04-literal.flac', 4, 1, 'flac', 111000, 44100, 1710000104),
+				('track-005', 1, 'vol-001', 'Wildcard Trap', '05-trap.flac', 'Demo Artist', 'Demo Artist', 'JazzA100X/05-trap.flac', 5, 1, 'flac', 111000, 44100, 1710000105);
 	`); err != nil {
 		t.Fatalf("seed library rows: %v", err)
 	}
@@ -434,6 +439,17 @@ func TestQuerySnapshotSupportsDirectoryFilter(t *testing.T) {
 	}
 	if snapshot.Query.DirectoryVolumeUUID != "vol-001" || snapshot.Query.DirectoryPath != "OST" {
 		t.Fatalf("unexpected query round-trip: %+v", snapshot.Query)
+	}
+
+	literalSnapshot := New(dbPath).QuerySnapshot(context.Background(), Query{
+		DirectoryVolumeUUID: "vol-001",
+		DirectoryPath:       "Jazz_100%",
+	})
+	if len(literalSnapshot.Directories) != 1 || literalSnapshot.Directories[0].RelativePath != "Jazz_100%/Set 01" {
+		t.Fatalf("unexpected escaped directories: %+v", literalSnapshot.Directories)
+	}
+	if len(literalSnapshot.Tracks) != 1 || literalSnapshot.Tracks[0].TrackUID != "track-004" {
+		t.Fatalf("unexpected escaped filtered tracks: %+v", literalSnapshot.Tracks)
 	}
 }
 

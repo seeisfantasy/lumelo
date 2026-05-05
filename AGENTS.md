@@ -12,14 +12,15 @@
 专项场景再补读：
 - 开发环境、出包、工作区：`docs/Development_Environment_README.md`
 - 配网协议：`docs/Provisioning_Protocol.md`
-- T4 无线金样：`docs/T4_WiFi_Golden_Baseline.md`
-- 给外部 AI 的静态审查入口：`docs/review/`
+- T4 无线金样与 bring-up：`docs/Development_Environment_README.md` + `docs/T4_Bringup_Checklist.md`
+- 给外部 AI 的静态审查：用 `scripts/build-ai-review-docs.py` 生成 `docs/review/`
 
 文档权威边界：
 - 长期产品边界：`docs/Product_Development_Manual.md`
 - 当前阶段、已验证事实、未闭环事项：`docs/AI_Handoff_Memory.md` + `docs/Development_Progress_Log.md`
 - 真机 bring-up / 烧录后核查：`docs/T4_Bringup_Checklist.md`
-- 外部 AI 静态审查：`docs/review/`
+- 外部 AI 静态审查：`scripts/build-ai-review-docs.py` 生成的 `docs/review/`
+  - `docs/review/` 是 generated bundle，不作为长期权威文档维护。
   - 若与仓库真实文件或主文档冲突，以仓库真实文件和主文档为准。
 - 不要把同一条规则复制进 3 份文档。
 
@@ -154,7 +155,7 @@
 - 当前阶段改 `docs/Development_Progress_Log.md`
 - 烧录核查改 `docs/T4_Bringup_Checklist.md`
 - 新窗口路由优先维护 `docs/README.md`
-- 外部 AI 静态审查入口维护在 `docs/review/`
+- 外部 AI 静态审查入口通过 `scripts/build-ai-review-docs.py` 生成 `docs/review/`，不要把生成物当长期文档维护
 
 ## 11. 何时用 subagent
 可以显式要求 spawn subagents 的典型场景：

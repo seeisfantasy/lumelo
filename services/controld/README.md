@@ -47,7 +47,7 @@ Phase 2 current batch:
 - `Library` page now receives a stable snapshot API base path; current query comes from browser URL / history
 - SSR first paint and no-JS fallback still remain in place
 
-Current detailed plan:
+Current detailed contract:
 
-- [docs/WebUI_API_Contract_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_API_Contract_Plan.md)
-- [docs/WebUI_Design_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_Design_Plan.md)
+- [docs/Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md), especially `controld` boundary and `API 与服务 Contract`
+- [docs/Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md) for current implementation status

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -442,11 +443,11 @@ func queryTracks(ctx context.Context, db *sql.DB, query Query) ([]TrackSummary, 
 			JOIN volumes ON volumes.volume_uuid = tracks.volume_uuid
 			WHERE tracks.volume_uuid = ?1
 			  AND `+visibleVolumePredicate("volumes")+`
-			  AND (tracks.relative_path = ?2 OR tracks.relative_path LIKE ?3)
-			ORDER BY
-				tracks.relative_path ASC,
-				tracks.track_uid ASC
-		`, query.DirectoryVolumeUUID, query.DirectoryPath, query.DirectoryPath+"/%")
+				  AND (tracks.relative_path = ?2 OR tracks.relative_path LIKE ?3 ESCAPE '\')
+				ORDER BY
+					tracks.relative_path ASC,
+					tracks.track_uid ASC
+			`, query.DirectoryVolumeUUID, query.DirectoryPath, escapeLikePattern(query.DirectoryPath)+"/%")
 		}
 	} else {
 		rows, err = db.QueryContext(ctx, `
@@ -528,6 +529,13 @@ func queryTracks(ctx context.Context, db *sql.DB, query Query) ([]TrackSummary, 
 
 func visibleVolumePredicate(alias string) string {
 	return alias + ".mount_path NOT LIKE '/var/lib/lumelo/test-media%'"
+}
+
+func escapeLikePattern(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return value
 }
 
 const (

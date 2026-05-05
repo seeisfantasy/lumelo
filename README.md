@@ -156,7 +156,8 @@ First actual image artifact built on `2026-04-07 00:16` (Asia/Shanghai):
 Minimal image verification already passed:
 
 - rootfs `p8` contains `playbackd / sessiond / media-indexd / controld`
-- `local-mode.target` is enabled in `multi-user.target.wants`
+- `lumelo-mode-manager.service` is enabled in `multi-user.target.wants`
+- `mode=local` starts `local-mode.target`
 - build marker exists in `/etc/lumelo/smoke-build.txt`
 
 ## T4 Lumelo Rootfs Image

@@ -75,6 +75,58 @@
         </div>
       </section>
 
+      <section class="card page-main">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">系统</p>
+            <h2>运行设置</h2>
+          </div>
+          <p class="summary section-summary">
+            会影响启动模式、网络接口或 DSD 输出的设置，保存后需要重启生效。
+          </p>
+        </div>
+        {{if .Settings.Warning}}
+          <p class="banner banner-error">配置告警：{{.Settings.Warning}}</p>
+        {{end}}
+        <p class="banner" id="settings-command-message" hidden></p>
+        <p class="banner banner-error" id="settings-command-error" hidden></p>
+        <form id="settings-form" class="settings-form">
+          <div class="settings-field">
+            <label class="settings-label" for="settings-mode">模式</label>
+            <select id="settings-mode" name="mode" class="settings-select">
+              <option value="local" {{if eq .Settings.Mode "local"}}selected{{end}}>本地模式</option>
+              <option value="bridge" {{if eq .Settings.Mode "bridge"}}selected{{end}}>桥接占位</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <label class="settings-label" for="settings-interface-mode">网络接口</label>
+            <select id="settings-interface-mode" name="interface_mode" class="settings-select">
+              <option value="ethernet" {{if eq .Settings.InterfaceMode "ethernet"}}selected{{end}}>Ethernet</option>
+              <option value="wifi" {{if eq .Settings.InterfaceMode "wifi"}}selected{{end}}>Wi-Fi</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <label class="settings-label" for="settings-dsd-policy">DSD 输出</label>
+            <select id="settings-dsd-policy" name="dsd_policy" class="settings-select">
+              <option value="native_dsd" {{if eq .Settings.DSDPolicy "native_dsd"}}selected{{end}}>Native DSD</option>
+              <option value="dop" {{if eq .Settings.DSDPolicy "dop"}}selected{{end}}>DoP</option>
+              <option value="pcm" {{if eq .Settings.DSDPolicy "pcm"}}selected{{end}}>PCM fallback</option>
+            </select>
+          </div>
+          <label class="settings-field">
+            <span class="settings-label">SSH</span>
+            <span>
+              <input type="checkbox" name="ssh_enabled" {{if .Settings.SSHEnabled}}checked{{end}}>
+              开启 SSH
+            </span>
+          </label>
+          <div class="actions">
+            <button type="submit">保存</button>
+            <button type="button" id="settings-reboot-button" class="button-secondary" hidden>确认重启并保存</button>
+          </div>
+        </form>
+      </section>
+
       <section class="card page-main" data-provisioning-updated-at="{{.Provisioning.UpdatedAt}}">
         <div class="section-header">
           <div>
@@ -235,6 +287,88 @@
       </section>
     </main>
     <script>
+      (() => {
+        const form = document.getElementById("settings-form");
+        const message = document.getElementById("settings-command-message");
+        const error = document.getElementById("settings-command-error");
+        const rebootButton = document.getElementById("settings-reboot-button");
+        if (!form || !window.fetch) {
+          return;
+        }
+
+        let pendingPayload = null;
+
+        const setBanner = (node, text) => {
+          if (!node) {
+            return;
+          }
+          node.textContent = text || "";
+          node.hidden = !text;
+        };
+
+        const readPayload = () => ({
+          mode: form.elements.mode.value,
+          interface_mode: form.elements.interface_mode.value,
+          dsd_policy: form.elements.dsd_policy.value,
+          ssh_enabled: Boolean(form.elements.ssh_enabled.checked)
+        });
+
+        const postSettings = async (payload, commit) => {
+          const response = await fetch(`/api/v1/settings${commit ? "?commit=true" : ""}`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok || !data.ok) {
+            throw new Error(data.message || `settings request failed: ${response.status}`);
+          }
+          return data;
+        };
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          setBanner(message, "");
+          setBanner(error, "");
+          rebootButton.hidden = true;
+          pendingPayload = readPayload();
+          try {
+            const preview = await postSettings(pendingPayload, false);
+            if (preview.requires_reboot) {
+              rebootButton.hidden = false;
+              setBanner(message, "这些设置需要重启生效。确认后会写入配置并请求重启。");
+              return;
+            }
+            const committed = await postSettings(pendingPayload, true);
+            setBanner(message, committed.message || "设置已保存");
+          } catch (err) {
+            pendingPayload = null;
+            setBanner(error, err.message || String(err));
+          }
+        });
+
+        rebootButton.addEventListener("click", async () => {
+          if (!pendingPayload) {
+            return;
+          }
+          setBanner(message, "");
+          setBanner(error, "");
+          try {
+            const committed = await postSettings(pendingPayload, true);
+            const reboot = await fetch("/api/v1/system/reboot-request", {method: "POST"});
+            const rebootData = await reboot.json().catch(() => ({}));
+            if (!reboot.ok || !rebootData.ok) {
+              throw new Error(rebootData.message || `reboot request failed: ${reboot.status}`);
+            }
+            setBanner(message, `${committed.message || "设置已保存"}；${rebootData.message || "重启请求已发送"}`);
+            rebootButton.hidden = true;
+            pendingPayload = null;
+          } catch (err) {
+            setBanner(error, err.message || String(err));
+          }
+        });
+      })();
+
       (() => {
         const card = document.querySelector("[data-provisioning-updated-at]");
         if (!card || !window.fetch) {

@@ -1,22 +1,22 @@
 [Unit]
 Description=Lumelo Web Control Service
-After=auth-recovery.service sessiond.service network.target
-Requires=playbackd.service
+After=auth-recovery.service network.target
 ConditionPathExists=/usr/bin/controld
 
 [Service]
 Type=simple
 Environment=LUMELO_RUNTIME_DIR=/run/lumelo
 Environment=CONTROLD_LISTEN_ADDR=0.0.0.0:80
+Environment=CONTROLD_SSH_APPLY_COMMAND=/usr/libexec/lumelo/ssh-apply
 ExecStart=/usr/bin/controld
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=lumelo
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 StateDirectory=lumelo
-StateDirectoryMode=0755
+StateDirectoryMode=0750
 WorkingDirectory=/var/lib/lumelo
 
 [Install]
-WantedBy=local-mode.target
+WantedBy=local-mode.target bridge-mode.target

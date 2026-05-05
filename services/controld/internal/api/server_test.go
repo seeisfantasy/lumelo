@@ -134,6 +134,67 @@ func TestHealthzPrefersConnectedWiFiInterfaceModeFromProvisioningSnapshot(t *tes
 	}
 }
 
+func TestSettingsValidateAndCommitWritesConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.toml")
+	cfg := settings.Default()
+	cfg.ConfigPath = configPath
+	server, err := api.New(api.Dependencies{
+		Auth: auth.NewService(false),
+		Playback: playbackclient.New(
+			filepath.Join(tempDir, "missing-playback-cmd.sock"),
+			filepath.Join(tempDir, "missing-playback-evt.sock"),
+		),
+		Library:      libraryclient.New(filepath.Join(tempDir, "missing-library.db")),
+		Logs:         &fakeLogSource{},
+		Provisioning: &fakeProvisioningSource{},
+		Settings:     cfg,
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
+
+	body := strings.NewReader(`{"mode":"bridge","interface_mode":"wifi","dsd_output_policy":"dop","ssh_enabled":true}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/settings", body)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("validate status = %d body=%s", response.Code, response.Body.String())
+	}
+	var validatePayload struct {
+		OK             bool `json:"ok"`
+		Committed      bool `json:"committed"`
+		RequiresReboot bool `json:"requires_reboot"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &validatePayload); err != nil {
+		t.Fatalf("decode validate response: %v", err)
+	}
+	if !validatePayload.OK || validatePayload.Committed || !validatePayload.RequiresReboot {
+		t.Fatalf("unexpected validate payload: %+v", validatePayload)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("validate-only request wrote config: %v", err)
+	}
+
+	body = strings.NewReader(`{"mode":"bridge","interface_mode":"wifi","dsd_output_policy":"dop","ssh_enabled":true,"commit":true}`)
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/settings", body)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("commit status = %d body=%s", response.Code, response.Body.String())
+	}
+	loaded, err := settings.Load(configPath)
+	if err != nil {
+		t.Fatalf("load committed config: %v", err)
+	}
+	if loaded.Mode != "bridge" || loaded.InterfaceMode != "wifi" || loaded.DSDPolicy != "dop" || !loaded.SSHEnabled {
+		t.Fatalf("committed config mismatch: %+v", loaded)
+	}
+}
+
 func TestHealthzPrefersConnectedWiredInterfaceModeFromProvisioningSnapshot(t *testing.T) {
 	server := newTestServer(t, &fakeLogSource{text: "boot ok\n"}, &fakeProvisioningSource{
 		snapshot: provisioningclient.Snapshot{
@@ -204,6 +265,76 @@ func TestHealthzIncludesProvisioningDiagnostics(t *testing.T) {
 		payload.ProvisioningRFCOMM != 1 ||
 		payload.ProvisioningSDPCount != 1 {
 		t.Fatalf("unexpected provisioning diagnostics: %+v", payload)
+	}
+}
+
+func TestAuthGateRequiresAdminSetupBeforeNormalWebUI(t *testing.T) {
+	server := newAuthTestServer(t, auth.NewMemoryService(false))
+
+	htmlRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(htmlResponse, htmlRequest)
+	if htmlResponse.Code != http.StatusSeeOther || htmlResponse.Header().Get("Location") != "/setup-admin" {
+		t.Fatalf("expected setup redirect, got status=%d location=%q", htmlResponse.Code, htmlResponse.Header().Get("Location"))
+	}
+
+	apiRequest := httptest.NewRequest(http.MethodGet, "/api/v1/playback/status", nil)
+	apiResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(apiResponse, apiRequest)
+	if apiResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected API forbidden before admin setup, got %d body=%s", apiResponse.Code, apiResponse.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/provisioning-status", nil)
+	statusResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("setup provisioning status exception should remain readable, got %d", statusResponse.Code)
+	}
+}
+
+func TestAuthGateRequiresLoginAndSameOriginForStateChanges(t *testing.T) {
+	authService := auth.NewMemoryService(false)
+	if err := authService.SetPassword("password123"); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	server := newAuthTestServer(t, authService)
+
+	unauthRequest := httptest.NewRequest(http.MethodGet, "/api/v1/playback/status", nil)
+	unauthResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthResponse, unauthRequest)
+	if unauthResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized API without session, got %d", unauthResponse.Code)
+	}
+
+	token, err := authService.CreateSession()
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	getRequest := httptest.NewRequest(http.MethodGet, "/api/v1/playback/status", nil)
+	getRequest.AddCookie(&http.Cookie{Name: auth.DefaultCookieName, Value: token})
+	getResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(getResponse, getRequest)
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("expected authenticated GET to pass, got %d body=%s", getResponse.Code, getResponse.Body.String())
+	}
+
+	postRequest := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	postRequest.AddCookie(&http.Cookie{Name: auth.DefaultCookieName, Value: token})
+	postResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(postResponse, postRequest)
+	if postResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected missing Origin/Referer to fail CSRF check, got %d", postResponse.Code)
+	}
+
+	postRequest = httptest.NewRequest(http.MethodPost, "/logout", nil)
+	postRequest.Host = "lumelo.local"
+	postRequest.Header.Set("Origin", "http://lumelo.local")
+	postRequest.AddCookie(&http.Cookie{Name: auth.DefaultCookieName, Value: token})
+	postResponse = httptest.NewRecorder()
+	server.Handler().ServeHTTP(postResponse, postRequest)
+	if postResponse.Code != http.StatusSeeOther || postResponse.Header().Get("Location") != "/login" {
+		t.Fatalf("expected same-origin logout redirect, got status=%d location=%q", postResponse.Code, postResponse.Header().Get("Location"))
 	}
 }
 
@@ -1501,6 +1632,31 @@ func newTestServer(t *testing.T, logs api.LogSource, provisioning api.Provisioni
 		t.Fatalf("build server: %v", err)
 	}
 
+	return server
+}
+
+func newAuthTestServer(t *testing.T, authService *auth.Service) *api.Server {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	server, err := api.New(api.Dependencies{
+		Auth: authService,
+		Playback: playbackclient.New(
+			filepath.Join(tempDir, "missing-playback-cmd.sock"),
+			filepath.Join(tempDir, "missing-playback-evt.sock"),
+		),
+		Library:      libraryclient.New(filepath.Join(tempDir, "missing-library.db")),
+		Logs:         &fakeLogSource{text: "boot ok\n"},
+		Provisioning: &fakeProvisioningSource{snapshot: provisioningclient.Snapshot{Available: true, State: "idle"}},
+		AudioOutput:  &fakeAudioOutputSource{},
+		Settings:     settings.Default(),
+		SSH:          sshctl.NewController(false),
+		Templates:    web.Assets,
+		Static:       web.Assets,
+	})
+	if err != nil {
+		t.Fatalf("build auth test server: %v", err)
+	}
 	return server
 }
 

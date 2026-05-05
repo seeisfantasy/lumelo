@@ -67,13 +67,17 @@ type HistoryEntry struct {
 }
 
 type Event struct {
-	Name        string `json:"name"`
-	TrackID     string `json:"track_id,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	Class       string `json:"class,omitempty"`
-	Recoverable bool   `json:"recoverable,omitempty"`
-	KeepQuiet   bool   `json:"keep_quiet,omitempty"`
+	Name            string `json:"name"`
+	TrackID         string `json:"track_id,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	Class           string `json:"class,omitempty"`
+	Recoverable     bool   `json:"recoverable,omitempty"`
+	KeepQuiet       bool   `json:"keep_quiet,omitempty"`
+	AutoSkipAfterMS int    `json:"auto_skip_after_ms,omitempty"`
+	QueueEntryID    string `json:"queue_entry_id,omitempty"`
 }
+
+const maxCommandLineBytes = 64 * 1024
 
 func New(commandSocket, eventSocket string) *Client {
 	return &Client{
@@ -232,6 +236,10 @@ func (c *Client) SubscribeEvents(ctx context.Context, handler func(Event) error)
 }
 
 func (c *Client) request(ctx context.Context, line string) (string, error) {
+	if len([]byte(line)) > maxCommandLineBytes {
+		return "", fmt.Errorf("playback command line too long: max=%d", maxCommandLineBytes)
+	}
+
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
 	conn, err := dialer.DialContext(ctx, "unix", c.CommandSocket)
 	if err != nil {
@@ -446,6 +454,14 @@ func parseEventLine(line string) (Event, error) {
 		event.Class = fields["class"]
 		event.Recoverable = fields["recoverable"] == "true"
 		event.KeepQuiet = fields["keep_quiet"] == "true"
+		if raw := strings.TrimSpace(fields["auto_skip_after_ms"]); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return Event{}, fmt.Errorf("invalid playback event auto_skip_after_ms: %w", err)
+			}
+			event.AutoSkipAfterMS = value
+		}
+		event.QueueEntryID = fields["queue_entry_id"]
 	case "PLAYBACK_PAUSED", "PLAYBACK_RESUMED":
 	default:
 		return Event{}, fmt.Errorf("unsupported playback event name: %s", event.Name)

@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+CONFIG_PATH="${LUMELO_CONFIG_PATH:-/etc/lumelo/config.toml}"
+DEFAULT_CONFIG_PATH="${LUMELO_DEFAULT_CONFIG_PATH:-/usr/share/lumelo/default_config.toml}"
+
+read_mode() {
+  file=$1
+  [ -f "${file}" ] || return 1
+  awk -F= '
+    /^[[:space:]]*mode[[:space:]]*=/ {
+      value=$2
+      gsub(/[[:space:]"'\'']/, "", value)
+      print value
+      exit
+    }
+  ' "${file}"
+}
+
+mode="${LUMELO_MODE:-}"
+if [ -z "${mode}" ]; then
+  mode="$(read_mode "${CONFIG_PATH}" || true)"
+fi
+if [ -z "${mode}" ]; then
+  mode="$(read_mode "${DEFAULT_CONFIG_PATH}" || true)"
+fi
+
+case "${mode}" in
+  local)
+    target=local-mode.target
+    ;;
+  bridge)
+    target=bridge-mode.target
+    ;;
+  *)
+    echo "lumelo-mode-manager: invalid or missing mode '${mode:-<empty>}', falling back to local" >&2
+    target=local-mode.target
+    ;;
+esac
+
+echo "lumelo-mode-manager: starting ${target}"
+exec systemctl start --no-block "${target}"

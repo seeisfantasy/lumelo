@@ -1,10 +1,12 @@
 use dsd_reader::DsdReader;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,6 +40,11 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/lumelo/config.toml";
 const ALLOW_ABSOLUTE_PATHS_ENV: &str = "LUMELO_PLAYBACK_ALLOW_ABSOLUTE_PATHS";
 const AUDIO_DEVICE_ENV: &str = "LUMELO_AUDIO_DEVICE";
 const ALSA_CARDS_PATH_ENV: &str = "LUMELO_ALSA_CARDS_PATH";
+const CONTENT_ERROR_AUTO_SKIP_AFTER: Duration = Duration::from_secs(6);
+const MAX_CONSECUTIVE_CONTENT_AUTO_SKIPS: u8 = 3;
+const MAX_COMMAND_LINE_BYTES: usize = 64 * 1024;
+const MAX_EVENT_SUBSCRIBERS: usize = 16;
+const MAX_STATE_FILE_BYTES: u64 = 1 << 20;
 const DEFAULT_DSD_POLICY: DsdOutputPolicy = DsdOutputPolicy::NativeDsd;
 const DSD64_RATE_HZ: u32 = 2_822_400;
 const DSD_SILENCE_BYTE: u8 = 0x69;
@@ -67,6 +74,7 @@ fn run() -> Result<(), String> {
     let event_hub = EventHub::bind(&event_socket)?;
     let listener = UnixListener::bind(&command_socket)
         .map_err(|err| format!("bind {}: {err}", command_socket.display()))?;
+    set_socket_permissions(&command_socket)?;
 
     let initial_state = load_runtime_state(queue_path.as_ref(), history_path.as_ref());
     let state = Arc::new(Mutex::new(initial_state));
@@ -126,6 +134,8 @@ struct RuntimeState {
     current_track: Option<String>,
     last_command: Option<String>,
     next_queue_entry_id: u64,
+    quiet_error_hold_generation: u64,
+    consecutive_content_failures: u8,
 }
 
 #[derive(Debug)]
@@ -137,12 +147,93 @@ struct CommandOutcome {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+struct ContentAutoSkipPlan {
+    failed_track_id: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct FailureApplication {
+    effective_keep_quiet: bool,
+    auto_skip: Option<ContentAutoSkipPlan>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum OutputAction {
     None,
-    Start(String),
+    Start {
+        track_id: String,
+        announce_started: bool,
+    },
     Pause,
     Resume(String),
     Stop,
+}
+
+#[derive(Clone)]
+struct FirstFrameNotifier {
+    state: Arc<Mutex<RuntimeState>>,
+    event_hub: EventHub,
+    history_path: Arc<PathBuf>,
+    track_id: String,
+    emit_started_event: bool,
+    fired: Arc<AtomicBool>,
+}
+
+impl FirstFrameNotifier {
+    fn new(
+        state: Arc<Mutex<RuntimeState>>,
+        event_hub: EventHub,
+        history_path: Arc<PathBuf>,
+        track_id: String,
+        emit_started_event: bool,
+    ) -> Self {
+        Self {
+            state,
+            event_hub,
+            history_path,
+            track_id,
+            emit_started_event,
+            fired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn notify(&self) {
+        if self.fired.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let history_log = if let Ok(mut runtime) = self.state.lock() {
+            if runtime.current_track.as_deref() == Some(self.track_id.as_str())
+                && matches!(
+                    runtime.playback_state,
+                    PlaybackState::PreQuiet | PlaybackState::QuietActive
+                )
+            {
+                if runtime.playback_state == PlaybackState::PreQuiet {
+                    runtime.playback_state = PlaybackState::QuietActive;
+                }
+                runtime.reset_content_failure_streak();
+                runtime.record_current_track_history();
+                Some(runtime.history_log.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(history_log) = history_log.as_ref() {
+            if let Err(err) = persist_history_log(self.history_path.as_ref(), history_log) {
+                eprintln!("playbackd first-frame history persist error: {err}");
+            }
+        }
+
+        if self.emit_started_event {
+            let _ = self.event_hub.broadcast(&PlaybackEvent::PlaybackStarted {
+                track_id: self.track_id.clone(),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -427,6 +518,16 @@ impl PlaybackOperationError {
             keep_quiet: false,
         }
     }
+
+    fn media_offline(code: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+            class: PlaybackFailureClass::MediaOffline,
+            recoverable: true,
+            keep_quiet: false,
+        }
+    }
 }
 
 impl TrackResolver {
@@ -514,10 +615,9 @@ impl TrackResolver {
             )
         })?;
         if !is_available {
-            return Err(PlaybackOperationError::content(
+            return Err(PlaybackOperationError::media_offline(
                 "track_volume_unavailable",
                 format!("track volume is offline: {}", track.volume_uuid),
-                false,
             ));
         }
 
@@ -604,15 +704,15 @@ impl OutputController {
         queue_path: Arc<PathBuf>,
         history_path: Arc<PathBuf>,
         track_resolver: TrackResolver,
+        announce_started: bool,
     ) -> Result<(), PlaybackOperationError> {
         if !track.absolute_path.exists() {
-            return Err(PlaybackOperationError::content(
+            return Err(PlaybackOperationError::media_offline(
                 "track_file_missing",
                 format!(
                     "resolved media path is missing: {}",
                     track.absolute_path.display()
                 ),
-                true,
             ));
         }
 
@@ -620,7 +720,14 @@ impl OutputController {
         self.stop_pid_and_wait(stale_pid);
 
         let output_device = self.resolve_output_device()?;
-        let child = self.spawn_output_child(&track, output_device.as_str())?;
+        let first_frame = Some(FirstFrameNotifier::new(
+            Arc::clone(&state),
+            event_hub.clone(),
+            Arc::clone(&history_path),
+            track.track_uid.clone(),
+            announce_started,
+        ));
+        let child = self.spawn_output_child(&track, output_device.as_str(), first_frame)?;
 
         let pid = child.id();
         {
@@ -759,27 +866,32 @@ impl OutputController {
         &self,
         track: &ResolvedTrack,
         device: &str,
+        first_frame: Option<FirstFrameNotifier>,
     ) -> Result<Child, PlaybackOperationError> {
         if is_dsd_format(track) {
-            return self.spawn_dsd_aplay(track, device);
+            return self.spawn_dsd_aplay(track, device, first_frame);
         }
 
         if resolved_format(track) == "wav" {
-            return self.spawn_aplay_file(track, device);
+            return self.spawn_wav_aplay(track, device, first_frame);
         }
 
-        self.spawn_decoded_aplay(track, device)
+        self.spawn_decoded_aplay(track, device, first_frame)
     }
 
-    fn spawn_aplay_file(
+    fn spawn_wav_aplay(
         &self,
         track: &ResolvedTrack,
         device: &str,
+        first_frame: Option<FirstFrameNotifier>,
     ) -> Result<Child, PlaybackOperationError> {
-        Command::new("aplay")
+        let mut child = Command::new("aplay")
             .arg("-D")
             .arg(device)
-            .arg(&track.absolute_path)
+            .arg("-t")
+            .arg("wav")
+            .arg("-")
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -792,13 +904,31 @@ impl OutputController {
                         device
                     ),
                 )
-            })
+            })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            PlaybackOperationError::output(
+                "alsa_pipe_unavailable",
+                format!("wav aplay stdin is unavailable for {}", track.track_uid),
+            )
+        })?;
+
+        let path = track.absolute_path.clone();
+        let track_id = track.track_uid.clone();
+        thread::spawn(move || {
+            if let Err(err) = stream_wav_audio(path, stdin, first_frame) {
+                eprintln!("playbackd wav stream error for {track_id}: {err}");
+            }
+        });
+
+        Ok(child)
     }
 
     fn spawn_dsd_aplay(
         &self,
         track: &ResolvedTrack,
         device: &str,
+        first_frame: Option<FirstFrameNotifier>,
     ) -> Result<Child, PlaybackOperationError> {
         let plan = select_dsd_playback_plan(track, device, self.dsd_policy)?;
         let mut child = Command::new("aplay")
@@ -843,7 +973,7 @@ impl OutputController {
         let track_id = track.track_uid.clone();
         let transport = plan.transport;
         thread::spawn(move || {
-            if let Err(err) = stream_dsd_audio(path, stdin, transport) {
+            if let Err(err) = stream_dsd_audio(path, stdin, transport, first_frame) {
                 eprintln!("playbackd dsd stream error for {track_id}: {err}");
             }
         });
@@ -855,6 +985,7 @@ impl OutputController {
         &self,
         track: &ResolvedTrack,
         device: &str,
+        first_frame: Option<FirstFrameNotifier>,
     ) -> Result<Child, PlaybackOperationError> {
         let pcm = inspect_decoded_pcm(track)?;
         let mut child = Command::new("aplay")
@@ -893,7 +1024,7 @@ impl OutputController {
         let path = track.absolute_path.clone();
         let track_id = track.track_uid.clone();
         thread::spawn(move || {
-            if let Err(err) = stream_decoded_audio(path, stdin) {
+            if let Err(err) = stream_decoded_audio(path, stdin, first_frame) {
                 eprintln!("playbackd decoder stream error for {track_id}: {err}");
             }
         });
@@ -979,6 +1110,8 @@ impl RuntimeState {
             current_track: None,
             last_command: None,
             next_queue_entry_id: 1,
+            quiet_error_hold_generation: 0,
+            consecutive_content_failures: 0,
         }
     }
 
@@ -999,10 +1132,16 @@ impl RuntimeState {
             current_track,
             last_command: None,
             next_queue_entry_id,
+            quiet_error_hold_generation: 0,
+            consecutive_content_failures: 0,
         }
     }
 
     fn apply_command(&mut self, command: PlaybackCommand) -> CommandOutcome {
+        if command_cancels_error_hold(&command) {
+            self.cancel_pending_error_hold();
+        }
+
         match command {
             PlaybackCommand::Ping => CommandOutcome {
                 response_line: format_ack_line(
@@ -1050,18 +1189,12 @@ impl RuntimeState {
                     };
                 }
 
-                self.enqueue_and_activate(track_id.clone(), "play");
-                self.record_current_track_history();
+                self.enqueue_and_prepare(track_id.clone(), "play");
                 CommandOutcome {
                     response_line: format_ack_line("play", self.playback_state, Some(&track_id)),
-                    events: vec![
-                        PlaybackEvent::PlayRequestAccepted {
-                            track_id: track_id.clone(),
-                        },
-                        PlaybackEvent::PlaybackStarted { track_id },
-                    ],
+                    events: vec![PlaybackEvent::PlayRequestAccepted { track_id }],
                     persist_queue: true,
-                    persist_history: true,
+                    persist_history: false,
                 }
             }
             PlaybackCommand::QueuePlay(track_ids) => self.queue_play(track_ids),
@@ -1098,21 +1231,15 @@ impl RuntimeState {
             PlaybackCommand::SetRepeatMode(mode) => self.set_repeat_mode(&mode),
             PlaybackCommand::PlayHistory(track_id) => {
                 self.play_history_now(track_id.clone());
-                self.record_current_track_history();
                 CommandOutcome {
                     response_line: format_ack_line(
                         "play_history",
                         self.playback_state,
                         Some(&track_id),
                     ),
-                    events: vec![
-                        PlaybackEvent::PlayRequestAccepted {
-                            track_id: track_id.clone(),
-                        },
-                        PlaybackEvent::PlaybackStarted { track_id },
-                    ],
+                    events: vec![PlaybackEvent::PlayRequestAccepted { track_id }],
                     persist_queue: true,
-                    persist_history: true,
+                    persist_history: false,
                 }
             }
             PlaybackCommand::Pause => {
@@ -1165,7 +1292,7 @@ impl RuntimeState {
 
     fn play_history_now(&mut self, track_id: String) {
         self.replace_current_queue_track(track_id.clone());
-        self.playback_state = PlaybackState::QuietActive;
+        self.playback_state = PlaybackState::PreQuiet;
         self.current_track = self.resolved_current_track();
         self.last_command = Some(format!("play_history:{track_id}"));
     }
@@ -1201,12 +1328,12 @@ impl RuntimeState {
         entry.duration_ms = None;
     }
 
-    fn enqueue_and_activate(&mut self, track_id: String, action: &str) {
+    fn enqueue_and_prepare(&mut self, track_id: String, action: &str) {
         let queue_entry_id = self.push_track_entry(track_id.clone());
         self.snapshot.play_order.push(queue_entry_id);
         self.snapshot.current_order_index = Some(self.snapshot.play_order.len().saturating_sub(1));
 
-        self.playback_state = PlaybackState::QuietActive;
+        self.playback_state = PlaybackState::PreQuiet;
         self.current_track = self.resolved_current_track();
         self.last_command = Some(format!("{action}:{track_id}"));
     }
@@ -1248,21 +1375,15 @@ impl RuntimeState {
         let current_queue_entry_id = self.snapshot.play_order.first().cloned();
         self.rebuild_play_order_for_mode(current_queue_entry_id);
         let track_id = track_ids[0].clone();
-        self.playback_state = PlaybackState::QuietActive;
+        self.playback_state = PlaybackState::PreQuiet;
         self.current_track = self.resolved_current_track();
         self.last_command = Some(format!("queue_play:{track_id}"));
-        self.record_current_track_history();
 
         CommandOutcome {
             response_line: format_ack_line("queue_play", self.playback_state, Some(&track_id)),
-            events: vec![
-                PlaybackEvent::PlayRequestAccepted {
-                    track_id: track_id.clone(),
-                },
-                PlaybackEvent::PlaybackStarted { track_id },
-            ],
+            events: vec![PlaybackEvent::PlayRequestAccepted { track_id }],
             persist_queue: true,
-            persist_history: true,
+            persist_history: false,
         }
     }
 
@@ -1302,7 +1423,7 @@ impl RuntimeState {
         };
         let current_index = self.snapshot.current_order_index;
         let active_output = self.has_active_output();
-        let mut persist_history = false;
+        let persist_history = false;
 
         self.snapshot.play_order.remove(remove_index);
         self.snapshot
@@ -1330,8 +1451,6 @@ impl RuntimeState {
                         self.snapshot.current_order_index = Some(remove_index);
                         self.current_track = self.resolved_current_track();
                         self.playback_state = PlaybackState::QuietActive;
-                        self.record_current_track_history();
-                        persist_history = true;
                         if let Some(track_id) = self.current_track.clone() {
                             events.push(PlaybackEvent::TrackChanged { track_id });
                         }
@@ -1585,7 +1704,6 @@ impl RuntimeState {
         self.current_track = Some(track.clone());
         self.playback_state = PlaybackState::QuietActive;
         self.last_command = Some(format!("{}:{track}", if forward { "next" } else { "prev" }));
-        self.record_current_track_history();
 
         CommandOutcome {
             response_line: format_ack_line(
@@ -1595,7 +1713,7 @@ impl RuntimeState {
             ),
             events: vec![PlaybackEvent::TrackChanged { track_id: track }],
             persist_queue: true,
-            persist_history: true,
+            persist_history: false,
         }
     }
 
@@ -1703,6 +1821,17 @@ impl RuntimeState {
             self.playback_state,
             PlaybackState::PreQuiet | PlaybackState::QuietActive
         )
+    }
+
+    fn cancel_pending_error_hold(&mut self) {
+        if self.playback_state == PlaybackState::QuietErrorHold {
+            self.quiet_error_hold_generation = self.quiet_error_hold_generation.wrapping_add(1);
+        }
+        self.consecutive_content_failures = 0;
+    }
+
+    fn reset_content_failure_streak(&mut self) {
+        self.consecutive_content_failures = 0;
     }
 
     fn record_current_track_history(&mut self) {
@@ -1820,24 +1949,98 @@ impl RuntimeState {
         changed
     }
 
-    fn apply_failure_state(&mut self, track_id: &str, err: &PlaybackOperationError) -> bool {
+    fn apply_failure_state(
+        &mut self,
+        track_id: &str,
+        err: &PlaybackOperationError,
+    ) -> Option<FailureApplication> {
         if self.current_track.as_deref() != Some(track_id) {
-            return false;
+            return None;
         }
         if !matches!(
             self.playback_state,
-            PlaybackState::QuietActive | PlaybackState::Paused
+            PlaybackState::PreQuiet | PlaybackState::QuietActive | PlaybackState::Paused
         ) {
-            return false;
+            return None;
         }
 
-        self.playback_state = match err.class {
-            PlaybackFailureClass::Output => PlaybackState::Stopped,
-            PlaybackFailureClass::Content if err.keep_quiet => PlaybackState::QuietErrorHold,
-            PlaybackFailureClass::Content => PlaybackState::Stopped,
-        };
+        let mut effective_keep_quiet = err.keep_quiet;
+        let mut auto_skip = None;
+        match err.class {
+            PlaybackFailureClass::Output => {
+                self.playback_state = PlaybackState::Stopped;
+                self.cancel_pending_error_hold();
+            }
+            PlaybackFailureClass::Content if err.keep_quiet => {
+                self.consecutive_content_failures =
+                    self.consecutive_content_failures.saturating_add(1);
+                self.quiet_error_hold_generation = self.quiet_error_hold_generation.wrapping_add(1);
+                if self.consecutive_content_failures > MAX_CONSECUTIVE_CONTENT_AUTO_SKIPS {
+                    self.playback_state = PlaybackState::Stopped;
+                    effective_keep_quiet = false;
+                } else {
+                    self.playback_state = PlaybackState::QuietErrorHold;
+                    auto_skip = Some(ContentAutoSkipPlan {
+                        failed_track_id: track_id.to_string(),
+                        generation: self.quiet_error_hold_generation,
+                    });
+                }
+            }
+            PlaybackFailureClass::Content => {
+                self.playback_state = PlaybackState::Stopped;
+                self.cancel_pending_error_hold();
+            }
+            PlaybackFailureClass::MediaOffline => {
+                self.playback_state = PlaybackState::Stopped;
+                self.cancel_pending_error_hold();
+            }
+        }
         self.last_command = Some(format!("playback_failed:{track_id}:{}", err.reason));
-        true
+        Some(FailureApplication {
+            effective_keep_quiet,
+            auto_skip,
+        })
+    }
+
+    fn prepare_content_auto_skip(&mut self, plan: &ContentAutoSkipPlan) -> TrackFinishAction {
+        if self.playback_state != PlaybackState::QuietErrorHold
+            || self.current_track.as_deref() != Some(plan.failed_track_id.as_str())
+            || self.quiet_error_hold_generation != plan.generation
+        {
+            return TrackFinishAction::None;
+        }
+
+        self.quiet_error_hold_generation = self.quiet_error_hold_generation.wrapping_add(1);
+        if let Some(next_index) = self.next_index_after_track_finish() {
+            self.snapshot.current_order_index = Some(next_index);
+            let Some(next_track) = self.resolved_current_track() else {
+                self.playback_state = PlaybackState::Stopped;
+                self.current_track = None;
+                self.last_command = Some(format!(
+                    "content_auto_skip:{}:missing_next",
+                    plan.failed_track_id
+                ));
+                return TrackFinishAction::Stop {
+                    reason: "content_error".to_string(),
+                };
+            };
+
+            self.current_track = Some(next_track.clone());
+            self.playback_state = PlaybackState::PreQuiet;
+            self.last_command = Some(format!("content_auto_skip:{next_track}"));
+            return TrackFinishAction::Start {
+                track_id: next_track,
+            };
+        }
+
+        self.playback_state = PlaybackState::Stopped;
+        self.last_command = Some(format!(
+            "content_auto_skip:{}:queue_end",
+            plan.failed_track_id
+        ));
+        TrackFinishAction::Stop {
+            reason: "content_error".to_string(),
+        }
     }
 
     fn finish_track_output(&mut self, track_id: &str) -> TrackFinishAction {
@@ -1862,7 +2065,6 @@ impl RuntimeState {
             self.current_track = Some(next_track.clone());
             self.playback_state = PlaybackState::QuietActive;
             self.last_command = Some(format!("auto_next:{next_track}"));
-            self.record_current_track_history();
             return TrackFinishAction::Start {
                 track_id: next_track,
             };
@@ -1890,6 +2092,16 @@ impl RuntimeState {
     }
 }
 
+fn command_cancels_error_hold(command: &PlaybackCommand) -> bool {
+    !matches!(
+        command,
+        PlaybackCommand::Ping
+            | PlaybackCommand::Status
+            | PlaybackCommand::QueueSnapshot
+            | PlaybackCommand::HistorySnapshot
+    )
+}
+
 #[derive(Clone, Debug)]
 struct EventHub {
     subscribers: Arc<Mutex<Vec<UnixStream>>>,
@@ -1900,6 +2112,7 @@ impl EventHub {
         prepare_socket_path(path)?;
         let listener =
             UnixListener::bind(path).map_err(|err| format!("bind {}: {err}", path.display()))?;
+        set_socket_permissions(path)?;
         let subscribers = Arc::new(Mutex::new(Vec::new()));
         let acceptors = Arc::clone(&subscribers);
 
@@ -1913,7 +2126,15 @@ impl EventHub {
                         }
 
                         match acceptors.lock() {
-                            Ok(mut subscribers) => subscribers.push(stream),
+                            Ok(mut subscribers) => {
+                                if subscribers.len() >= MAX_EVENT_SUBSCRIBERS {
+                                    eprintln!(
+                                        "playbackd event subscriber rejected: too many subscribers"
+                                    );
+                                    continue;
+                                }
+                                subscribers.push(stream)
+                            }
                             Err(_) => {
                                 eprintln!("playbackd event subscriber lock poisoned");
                                 break;
@@ -1957,13 +2178,18 @@ fn handle_client(
             .try_clone()
             .map_err(|err| format!("clone client stream: {err}"))?,
     );
-    let mut line = String::new();
-    let read = reader
-        .read_line(&mut line)
-        .map_err(|err| format!("read command: {err}"))?;
-    if read == 0 {
-        return Err("client disconnected before sending a command".to_string());
-    }
+    let line = match read_command_line(&mut reader) {
+        Ok(Some(line)) => line,
+        Ok(None) => return Err("client disconnected before sending a command".to_string()),
+        Err(err) => {
+            let response = format_error_line("command_read_failed", &err);
+            let mut stream = stream;
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .map_err(|write_err| format!("write command read failure: {write_err}"))?;
+            return Ok(());
+        }
+    };
 
     let command = match parse_command_line(&line) {
         Ok(command) => command,
@@ -2043,14 +2269,66 @@ fn handle_client(
     Ok(())
 }
 
+fn read_command_line<R>(reader: &mut R) -> Result<Option<String>, String>
+where
+    R: BufRead,
+{
+    let mut buffer = Vec::new();
+    loop {
+        let (take, found_newline) = {
+            let available = reader
+                .fill_buf()
+                .map_err(|err| format!("read command: {err}"))?;
+            if available.is_empty() {
+                if buffer.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+
+            match available.iter().position(|byte| *byte == b'\n') {
+                Some(index) => (index + 1, true),
+                None => (available.len(), false),
+            }
+        };
+
+        if buffer.len() + take > MAX_COMMAND_LINE_BYTES {
+            return Err(format!(
+                "command line too long: max={MAX_COMMAND_LINE_BYTES}"
+            ));
+        }
+
+        let available = reader
+            .fill_buf()
+            .map_err(|err| format!("read command: {err}"))?;
+        buffer.extend_from_slice(&available[..take]);
+        reader.consume(take);
+
+        if found_newline {
+            break;
+        }
+    }
+
+    String::from_utf8(buffer)
+        .map(Some)
+        .map_err(|err| format!("command line is not utf-8: {err}"))
+}
+
 fn derive_output_action(state: &RuntimeState, outcome: &CommandOutcome) -> OutputAction {
     for event in &outcome.events {
         match event {
-            PlaybackEvent::PlaybackStarted { track_id } => {
-                return OutputAction::Start(track_id.clone())
+            PlaybackEvent::PlaybackStarted { .. } => {}
+            PlaybackEvent::PlayRequestAccepted { track_id } => {
+                return OutputAction::Start {
+                    track_id: track_id.clone(),
+                    announce_started: true,
+                }
             }
             PlaybackEvent::TrackChanged { track_id } => {
-                return OutputAction::Start(track_id.clone())
+                return OutputAction::Start {
+                    track_id: track_id.clone(),
+                    announce_started: false,
+                }
             }
             PlaybackEvent::PlaybackPaused => return OutputAction::Pause,
             PlaybackEvent::PlaybackResumed => {
@@ -2059,7 +2337,7 @@ fn derive_output_action(state: &RuntimeState, outcome: &CommandOutcome) -> Outpu
                 }
             }
             PlaybackEvent::PlaybackStopped { .. } => return OutputAction::Stop,
-            PlaybackEvent::PlayRequestAccepted { .. } | PlaybackEvent::PlaybackFailed { .. } => {}
+            PlaybackEvent::PlaybackFailed { .. } => {}
         }
     }
 
@@ -2082,19 +2360,46 @@ fn apply_output_action(
         OutputAction::Stop => output_controller.stop(),
         OutputAction::Pause => {
             if let Err(err) = output_controller.pause() {
-                apply_operation_failure(state, outcome, None, err);
+                let _ = apply_operation_failure(Arc::clone(&state), outcome, None, err);
             }
         }
         OutputAction::Resume(track_id) => {
             if let Err(err) = output_controller.resume(&track_id) {
-                apply_operation_failure(state, outcome, Some(track_id), err);
+                if let Some(plan) =
+                    apply_operation_failure(Arc::clone(&state), outcome, Some(track_id), err)
+                {
+                    schedule_content_auto_skip(
+                        output_controller.clone(),
+                        Arc::clone(&state),
+                        event_hub.clone(),
+                        Arc::clone(&queue_path),
+                        Arc::clone(&history_path),
+                        track_resolver.clone(),
+                        plan,
+                    );
+                }
             }
         }
-        OutputAction::Start(track_id) => {
+        OutputAction::Start {
+            track_id,
+            announce_started,
+        } => {
             let track = match track_resolver.resolve(&track_id) {
                 Ok(track) => track,
                 Err(err) => {
-                    apply_operation_failure(state, outcome, Some(track_id), err);
+                    if let Some(plan) =
+                        apply_operation_failure(Arc::clone(&state), outcome, Some(track_id), err)
+                    {
+                        schedule_content_auto_skip(
+                            output_controller.clone(),
+                            Arc::clone(&state),
+                            event_hub.clone(),
+                            Arc::clone(&queue_path),
+                            Arc::clone(&history_path),
+                            track_resolver.clone(),
+                            plan,
+                        );
+                    }
                     return;
                 }
             };
@@ -2109,11 +2414,24 @@ fn apply_output_action(
                 track,
                 Arc::clone(&state),
                 event_hub.clone(),
-                queue_path,
-                history_path,
+                Arc::clone(&queue_path),
+                Arc::clone(&history_path),
                 track_resolver.clone(),
+                announce_started,
             ) {
-                apply_operation_failure(state, outcome, Some(track_id), err);
+                if let Some(plan) =
+                    apply_operation_failure(Arc::clone(&state), outcome, Some(track_id), err)
+                {
+                    schedule_content_auto_skip(
+                        output_controller.clone(),
+                        Arc::clone(&state),
+                        event_hub.clone(),
+                        Arc::clone(&queue_path),
+                        Arc::clone(&history_path),
+                        track_resolver.clone(),
+                        plan,
+                    );
+                }
             }
         }
     }
@@ -2144,13 +2462,12 @@ fn preflight_track_request(
 ) -> Result<(), PlaybackOperationError> {
     let track = track_resolver.resolve(track_id)?;
     if !track.absolute_path.exists() {
-        return Err(PlaybackOperationError::content(
+        return Err(PlaybackOperationError::media_offline(
             "track_file_missing",
             format!(
                 "resolved media path is missing: {}",
                 track.absolute_path.display()
             ),
-            false,
         ));
     }
 
@@ -2162,10 +2479,17 @@ fn apply_operation_failure(
     outcome: &mut CommandOutcome,
     track_id: Option<String>,
     err: PlaybackOperationError,
-) {
+) -> Option<ContentAutoSkipPlan> {
+    let mut effective_keep_quiet = err.keep_quiet;
+    let mut auto_skip = None;
+    let mut failed_queue_entry_id = None;
     if let Some(track_id) = track_id.as_deref() {
         if let Ok(mut runtime) = state.lock() {
-            let _ = runtime.apply_failure_state(track_id, &err);
+            failed_queue_entry_id = runtime.current_queue_entry_id();
+            if let Some(application) = runtime.apply_failure_state(track_id, &err) {
+                effective_keep_quiet = application.effective_keep_quiet;
+                auto_skip = application.auto_skip;
+            }
             if outcome.persist_history {
                 let _ = runtime.rollback_recent_history_for_track(track_id);
             }
@@ -2177,9 +2501,14 @@ fn apply_operation_failure(
         reason: err.code.to_string(),
         class: err.class,
         recoverable: err.recoverable,
-        keep_quiet: err.keep_quiet,
+        keep_quiet: effective_keep_quiet,
+        auto_skip_after_ms: auto_skip
+            .as_ref()
+            .map(|_| CONTENT_ERROR_AUTO_SKIP_AFTER.as_millis() as u64),
+        queue_entry_id: failed_queue_entry_id,
     }];
     outcome.persist_history = false;
+    auto_skip
 }
 
 fn apply_async_operation_failure(
@@ -2187,10 +2516,17 @@ fn apply_async_operation_failure(
     event_hub: &EventHub,
     track_id: Option<&str>,
     err: PlaybackOperationError,
-) {
+) -> Option<ContentAutoSkipPlan> {
+    let mut effective_keep_quiet = err.keep_quiet;
+    let mut auto_skip = None;
+    let mut failed_queue_entry_id = None;
     if let Some(track_id) = track_id {
         if let Ok(mut runtime) = state.lock() {
-            let _ = runtime.apply_failure_state(track_id, &err);
+            failed_queue_entry_id = runtime.current_queue_entry_id();
+            if let Some(application) = runtime.apply_failure_state(track_id, &err) {
+                effective_keep_quiet = application.effective_keep_quiet;
+                auto_skip = application.auto_skip;
+            }
             let _ = runtime.rollback_recent_history_for_track(track_id);
         }
     }
@@ -2199,8 +2535,138 @@ fn apply_async_operation_failure(
         reason: err.code.to_string(),
         class: err.class,
         recoverable: err.recoverable,
-        keep_quiet: err.keep_quiet,
+        keep_quiet: effective_keep_quiet,
+        auto_skip_after_ms: auto_skip
+            .as_ref()
+            .map(|_| CONTENT_ERROR_AUTO_SKIP_AFTER.as_millis() as u64),
+        queue_entry_id: failed_queue_entry_id,
     });
+    auto_skip
+}
+
+fn schedule_content_auto_skip(
+    output_controller: OutputController,
+    state: Arc<Mutex<RuntimeState>>,
+    event_hub: EventHub,
+    queue_path: Arc<PathBuf>,
+    history_path: Arc<PathBuf>,
+    track_resolver: TrackResolver,
+    plan: ContentAutoSkipPlan,
+) {
+    thread::spawn(move || {
+        thread::sleep(CONTENT_ERROR_AUTO_SKIP_AFTER);
+        handle_content_auto_skip(
+            &output_controller,
+            state,
+            &event_hub,
+            queue_path,
+            history_path,
+            track_resolver,
+            plan,
+        );
+    });
+}
+
+fn handle_content_auto_skip(
+    output_controller: &OutputController,
+    state: Arc<Mutex<RuntimeState>>,
+    event_hub: &EventHub,
+    queue_path: Arc<PathBuf>,
+    history_path: Arc<PathBuf>,
+    track_resolver: TrackResolver,
+    plan: ContentAutoSkipPlan,
+) {
+    let (finish_action, queue_snapshot) = {
+        let mut runtime = match state.lock() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let finish_action = runtime.prepare_content_auto_skip(&plan);
+        let queue_snapshot = matches!(finish_action, TrackFinishAction::Start { .. })
+            .then(|| runtime.snapshot.clone());
+        (finish_action, queue_snapshot)
+    };
+
+    if let Some(snapshot) = queue_snapshot.as_ref() {
+        if let Err(err) = persist_queue_snapshot(queue_path.as_ref(), snapshot) {
+            eprintln!("playbackd content auto-skip queue persist error: {err}");
+        }
+    }
+    match finish_action {
+        TrackFinishAction::None => {}
+        TrackFinishAction::Stop { reason } => {
+            let _ = event_hub.broadcast(&PlaybackEvent::PlaybackStopped { reason });
+        }
+        TrackFinishAction::Start { track_id } => {
+            let _ = event_hub.broadcast(&PlaybackEvent::PlayRequestAccepted {
+                track_id: track_id.clone(),
+            });
+            let track = match track_resolver.resolve(&track_id) {
+                Ok(track) => track,
+                Err(err) => {
+                    if let Some(next_plan) = apply_async_operation_failure(
+                        Arc::clone(&state),
+                        event_hub,
+                        Some(track_id.as_str()),
+                        err,
+                    ) {
+                        schedule_content_auto_skip(
+                            output_controller.clone(),
+                            Arc::clone(&state),
+                            event_hub.clone(),
+                            Arc::clone(&queue_path),
+                            Arc::clone(&history_path),
+                            track_resolver,
+                            next_plan,
+                        );
+                    }
+                    return;
+                }
+            };
+
+            let maybe_snapshot = {
+                let mut runtime = match state.lock() {
+                    Ok(runtime) => runtime,
+                    Err(_) => return,
+                };
+                runtime
+                    .enrich_current_track(&track)
+                    .then(|| runtime.snapshot.clone())
+            };
+            if let Some(snapshot) = maybe_snapshot.as_ref() {
+                if let Err(err) = persist_queue_snapshot(queue_path.as_ref(), snapshot) {
+                    eprintln!("playbackd content auto-skip queue persist error: {err}");
+                }
+            }
+
+            if let Err(err) = output_controller.start(
+                track,
+                Arc::clone(&state),
+                event_hub.clone(),
+                Arc::clone(&queue_path),
+                Arc::clone(&history_path),
+                track_resolver.clone(),
+                true,
+            ) {
+                if let Some(next_plan) = apply_async_operation_failure(
+                    Arc::clone(&state),
+                    event_hub,
+                    Some(track_id.as_str()),
+                    err,
+                ) {
+                    schedule_content_auto_skip(
+                        output_controller.clone(),
+                        Arc::clone(&state),
+                        event_hub.clone(),
+                        Arc::clone(&queue_path),
+                        Arc::clone(&history_path),
+                        track_resolver,
+                        next_plan,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn handle_finished_track_success(
@@ -2212,7 +2678,7 @@ fn handle_finished_track_success(
     track_resolver: TrackResolver,
     finished_track_id: &str,
 ) {
-    let (finish_action, queue_snapshot, history_log) = {
+    let (finish_action, queue_snapshot) = {
         let mut runtime = match state.lock() {
             Ok(runtime) => runtime,
             Err(_) => return,
@@ -2220,9 +2686,7 @@ fn handle_finished_track_success(
         let finish_action = runtime.finish_track_output(finished_track_id);
         let queue_snapshot = matches!(finish_action, TrackFinishAction::Start { .. })
             .then(|| runtime.snapshot.clone());
-        let history_log = matches!(finish_action, TrackFinishAction::Start { .. })
-            .then(|| runtime.history_log.clone());
-        (finish_action, queue_snapshot, history_log)
+        (finish_action, queue_snapshot)
     };
 
     if let Some(snapshot) = queue_snapshot.as_ref() {
@@ -2230,12 +2694,6 @@ fn handle_finished_track_success(
             eprintln!("playbackd async queue persist error: {err}");
         }
     }
-    if let Some(history_log) = history_log.as_ref() {
-        if let Err(err) = persist_history_log(history_path.as_ref(), history_log) {
-            eprintln!("playbackd async history persist error: {err}");
-        }
-    }
-
     match finish_action {
         TrackFinishAction::None => {}
         TrackFinishAction::Stop { reason } => {
@@ -2245,7 +2703,22 @@ fn handle_finished_track_success(
             let track = match track_resolver.resolve(&track_id) {
                 Ok(track) => track,
                 Err(err) => {
-                    apply_async_operation_failure(state, event_hub, Some(track_id.as_str()), err);
+                    if let Some(plan) = apply_async_operation_failure(
+                        Arc::clone(&state),
+                        event_hub,
+                        Some(track_id.as_str()),
+                        err,
+                    ) {
+                        schedule_content_auto_skip(
+                            output_controller.clone(),
+                            Arc::clone(&state),
+                            event_hub.clone(),
+                            Arc::clone(&queue_path),
+                            Arc::clone(&history_path),
+                            track_resolver,
+                            plan,
+                        );
+                    }
                     return;
                 }
             };
@@ -2271,9 +2744,25 @@ fn handle_finished_track_success(
                 event_hub.clone(),
                 Arc::clone(&queue_path),
                 Arc::clone(&history_path),
-                track_resolver,
+                track_resolver.clone(),
+                false,
             ) {
-                apply_async_operation_failure(state, event_hub, Some(track_id.as_str()), err);
+                if let Some(plan) = apply_async_operation_failure(
+                    Arc::clone(&state),
+                    event_hub,
+                    Some(track_id.as_str()),
+                    err,
+                ) {
+                    schedule_content_auto_skip(
+                        output_controller.clone(),
+                        Arc::clone(&state),
+                        event_hub.clone(),
+                        Arc::clone(&queue_path),
+                        Arc::clone(&history_path),
+                        track_resolver,
+                        plan,
+                    );
+                }
                 return;
             }
 
@@ -2288,6 +2777,8 @@ fn prepare_socket_path(path: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("socket path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|err| format!("create socket dir {}: {err}", parent.display()))?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o750))
+        .map_err(|err| format!("chmod socket dir {}: {err}", parent.display()))?;
 
     if path.exists() {
         fs::remove_file(path)
@@ -2295,6 +2786,11 @@ fn prepare_socket_path(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn set_socket_permissions(path: &Path) -> Result<(), String> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o660))
+        .map_err(|err| format!("chmod socket {}: {err}", path.display()))
 }
 
 fn load_runtime_state(queue_path: &Path, history_path: &Path) -> RuntimeState {
@@ -2327,8 +2823,7 @@ fn load_queue_snapshot(queue_path: &Path) -> Result<QueueSnapshot, String> {
         return Ok(QueueSnapshot::empty());
     }
 
-    let raw = fs::read_to_string(queue_path)
-        .map_err(|err| format!("read queue state {}: {err}", queue_path.display()))?;
+    let raw = read_state_file(queue_path, "queue state")?;
     let persisted: PersistedQueueState = serde_json::from_str(&raw)
         .map_err(|err| format!("parse queue state {}: {err}", queue_path.display()))?;
     if persisted.version != QUEUE_FILE_VERSION {
@@ -2347,8 +2842,7 @@ fn load_history_log(history_path: &Path) -> Result<HistoryLog, String> {
         return Ok(HistoryLog::empty());
     }
 
-    let raw = fs::read_to_string(history_path)
-        .map_err(|err| format!("read history state {}: {err}", history_path.display()))?;
+    let raw = read_state_file(history_path, "history state")?;
     let persisted: PersistedHistoryState = serde_json::from_str(&raw)
         .map_err(|err| format!("parse history state {}: {err}", history_path.display()))?;
     if persisted.version != HISTORY_FILE_VERSION {
@@ -2360,6 +2854,21 @@ fn load_history_log(history_path: &Path) -> Result<HistoryLog, String> {
     }
 
     Ok(persisted.into_log())
+}
+
+fn read_state_file(path: &Path, label: &str) -> Result<String, String> {
+    let metadata =
+        fs::metadata(path).map_err(|err| format!("stat {label} {}: {err}", path.display()))?;
+    if metadata.len() > MAX_STATE_FILE_BYTES {
+        return Err(format!(
+            "{label} {} too large: {} > {} bytes",
+            path.display(),
+            metadata.len(),
+            MAX_STATE_FILE_BYTES
+        ));
+    }
+
+    fs::read_to_string(path).map_err(|err| format!("read {label} {}: {err}", path.display()))
 }
 
 fn persist_queue_snapshot(queue_path: &Path, snapshot: &QueueSnapshot) -> Result<(), String> {
@@ -2398,6 +2907,11 @@ where
             tmp_path.display()
         )
     })?;
+    let parent_dir = fs::File::open(parent)
+        .map_err(|err| format!("open {label} dir {} for fsync: {err}", parent.display()))?;
+    parent_dir
+        .sync_all()
+        .map_err(|err| format!("fsync {label} dir {}: {err}", parent.display()))?;
 
     Ok(())
 }
@@ -2953,7 +3467,87 @@ fn inspect_decoded_pcm(track: &ResolvedTrack) -> Result<DecodedPCMConfig, Playba
     }
 }
 
-fn stream_decoded_audio(path: PathBuf, mut stdin: ChildStdin) -> Result<(), String> {
+fn stream_wav_audio(
+    path: PathBuf,
+    mut stdin: ChildStdin,
+    first_frame: Option<FirstFrameNotifier>,
+) -> Result<(), String> {
+    let data_offset = wav_data_offset(&path)?;
+    let mut file =
+        fs::File::open(&path).map_err(|err| format!("open {}: {err}", path.display()))?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut remaining_header = data_offset;
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|err| format!("seek wav header {}: {err}", path.display()))?;
+    while remaining_header > 0 {
+        let limit = buffer.len().min(remaining_header as usize);
+        let read = file
+            .read(&mut buffer[..limit])
+            .map_err(|err| format!("read wav header {}: {err}", path.display()))?;
+        if read == 0 {
+            return Err(format!(
+                "unexpected EOF before wav data for {}",
+                path.display()
+            ));
+        }
+        stdin
+            .write_all(&buffer[..read])
+            .map_err(|err| format!("write wav header to aplay for {}: {err}", path.display()))?;
+        remaining_header -= read as u64;
+    }
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|err| format!("read wav data {}: {err}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        stdin
+            .write_all(&buffer[..read])
+            .map_err(|err| format!("write wav data to aplay for {}: {err}", path.display()))?;
+        if let Some(notifier) = &first_frame {
+            notifier.notify();
+        }
+    }
+
+    drop(stdin);
+    Ok(())
+}
+
+fn wav_data_offset(path: &Path) -> Result<u64, String> {
+    let mut file =
+        fs::File::open(path).map_err(|err| format!("open wav {}: {err}", path.display()))?;
+    let mut header = [0_u8; 12];
+    file.read_exact(&mut header)
+        .map_err(|err| format!("read wav header {}: {err}", path.display()))?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Err(format!("{} is not a RIFF/WAVE file", path.display()));
+    }
+
+    let mut offset = 12_u64;
+    loop {
+        let mut chunk = [0_u8; 8];
+        file.read_exact(&mut chunk)
+            .map_err(|err| format!("read wav chunk header {}: {err}", path.display()))?;
+        let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
+        offset += 8;
+        if &chunk[0..4] == b"data" {
+            return Ok(offset);
+        }
+        let padded_size = size + (size % 2);
+        file.seek(SeekFrom::Current(padded_size as i64))
+            .map_err(|err| format!("seek wav chunk {}: {err}", path.display()))?;
+        offset += padded_size;
+    }
+}
+
+fn stream_decoded_audio(
+    path: PathBuf,
+    mut stdin: ChildStdin,
+    first_frame: Option<FirstFrameNotifier>,
+) -> Result<(), String> {
     let (mut format, track_id, mut decoder) = open_decoder(&path)?;
     let mut pcm_bytes = Vec::new();
 
@@ -2995,6 +3589,9 @@ fn stream_decoded_audio(path: PathBuf, mut stdin: ChildStdin) -> Result<(), Stri
         stdin
             .write_all(&pcm_bytes)
             .map_err(|err| format!("write pcm to aplay for {}: {err}", path.display()))?;
+        if let Some(notifier) = &first_frame {
+            notifier.notify();
+        }
     }
 
     drop(stdin);
@@ -3005,6 +3602,7 @@ fn stream_dsd_audio(
     path: PathBuf,
     mut stdin: ChildStdin,
     transport: DsdTransport,
+    first_frame: Option<FirstFrameNotifier>,
 ) -> Result<(), String> {
     let reader = DsdReader::from_container(path.clone())
         .map_err(|err| format!("open DSD container {}: {err}", path.display()))?;
@@ -3028,6 +3626,9 @@ fn stream_dsd_audio(
                 stdin.write_all(&native_bytes).map_err(|err| {
                     format!("write native DSD to aplay for {}: {err}", path.display())
                 })?;
+                if let Some(notifier) = &first_frame {
+                    notifier.notify();
+                }
             }
         }
         DsdTransport::Dop(format) => {
@@ -3053,6 +3654,9 @@ fn stream_dsd_audio(
                     stdin.write_all(&dop_bytes).map_err(|err| {
                         format!("write DoP frame to aplay for {}: {err}", path.display())
                     })?;
+                    if let Some(notifier) = &first_frame {
+                        notifier.notify();
+                    }
                     pending.drain(..channels * 2);
                 }
             }
@@ -3074,6 +3678,9 @@ fn stream_dsd_audio(
                         path.display()
                     )
                 })?;
+                if let Some(notifier) = &first_frame {
+                    notifier.notify();
+                }
             }
         }
         DsdTransport::Pcm => {
@@ -3110,6 +3717,9 @@ fn stream_dsd_audio(
                             path.display()
                         )
                     })?;
+                    if let Some(notifier) = &first_frame {
+                        notifier.notify();
+                    }
                     pending.drain(..channels * decimation_bytes_per_channel);
                 }
             }
@@ -3138,6 +3748,9 @@ fn stream_dsd_audio(
                         path.display()
                     )
                 })?;
+                if let Some(notifier) = &first_frame {
+                    notifier.notify();
+                }
             }
         }
     }
@@ -3337,15 +3950,18 @@ mod tests {
         apply_operation_failure, load_history_log, load_runtime_state, normalize_snapshot,
         parse_alsa_stream_capabilities, parse_dsd_output_policy_from_config, persist_history_log,
         persist_queue_snapshot, playback_track_id_for_preflight, preflight_track_request,
-        resolve_track_uid, select_dop_plan, select_native_dsd_plan, select_pcm_fallback_plan,
-        select_unique_usb_audio_output, usb_audio_output_devices_from_cards, AlsaDsdFormat,
-        AlsaStreamCapabilities, DopPcmFormat, DsdOutputPolicy, DsdSourceInfo,
-        PlaybackOperationError, ResolvedTrack, RuntimeState, TrackResolver, HISTORY_LIMIT,
+        read_command_line, resolve_track_uid, select_dop_plan, select_native_dsd_plan,
+        select_pcm_fallback_plan, select_unique_usb_audio_output,
+        usb_audio_output_devices_from_cards, AlsaDsdFormat, AlsaStreamCapabilities, DopPcmFormat,
+        DsdOutputPolicy, DsdSourceInfo, PlaybackOperationError, ResolvedTrack, RuntimeState,
+        TrackFinishAction, TrackResolver, HISTORY_LIMIT, MAX_COMMAND_LINE_BYTES,
+        MAX_CONSECUTIVE_CONTENT_AUTO_SKIPS, MAX_STATE_FILE_BYTES,
     };
-    use ipc_proto::parse_queue_snapshot_line;
+    use ipc_proto::{parse_queue_snapshot_line, PlaybackFailureClass};
     use media_model::{HistoryLog, OrderMode, QueueEntry, QueueSnapshot, RepeatMode};
     use rusqlite::Connection;
     use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3418,7 +4034,9 @@ mod tests {
         let mut state = RuntimeState::new();
 
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+        mark_current_track_first_frame(&mut state);
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-b".to_string()));
+        mark_current_track_first_frame(&mut state);
 
         assert_eq!(state.history_log.entries.len(), 2);
         assert_eq!(state.history_log.entries[0].track_uid, "track-b");
@@ -3435,8 +4053,7 @@ mod tests {
 
         {
             let runtime = state.lock().unwrap();
-            assert_eq!(runtime.history_log.entries.len(), 1);
-            assert_eq!(runtime.history_log.entries[0].track_uid, "track-a");
+            assert!(runtime.history_log.entries.is_empty());
         }
 
         apply_operation_failure(
@@ -3472,6 +4089,7 @@ mod tests {
         );
 
         assert!(state.enrich_current_track(&resolved));
+        mark_current_track_first_frame(&mut state);
         assert_eq!(state.history_log.entries.len(), 1);
         assert_eq!(state.history_log.entries[0].track_uid, "track-a");
         assert_eq!(state.history_log.entries[0].volume_uuid, "media-vol-1");
@@ -3504,10 +4122,10 @@ mod tests {
                 Some(123_000),
                 "flac",
             )));
-            assert_eq!(runtime.history_log.entries[0].volume_uuid, "media-vol-1");
+            assert!(runtime.history_log.entries.is_empty());
         }
 
-        apply_operation_failure(
+        let plan = apply_operation_failure(
             Arc::clone(&state),
             &mut outcome,
             Some("track-a".to_string()),
@@ -3516,12 +4134,79 @@ mod tests {
                 "resolved media path is missing",
                 true,
             ),
-        );
+        )
+        .expect("content keep_quiet failure should schedule auto-skip");
 
         let runtime = state.lock().unwrap();
         assert!(runtime.history_log.entries.is_empty());
         assert_eq!(runtime.playback_state.as_str(), "quiet_error_hold");
+        assert_eq!(plan.failed_track_id, "track-a");
         assert!(!outcome.persist_history);
+    }
+
+    #[test]
+    fn content_error_auto_skip_advances_and_does_not_keep_failed_track_history() {
+        let state = Arc::new(Mutex::new(RuntimeState::new()));
+        let mut outcome = {
+            let mut runtime = state.lock().unwrap();
+            runtime.apply_command(ipc_proto::PlaybackCommand::QueuePlay(vec![
+                "bad-track".to_string(),
+                "good-track".to_string(),
+            ]))
+        };
+
+        let plan = apply_operation_failure(
+            Arc::clone(&state),
+            &mut outcome,
+            Some("bad-track".to_string()),
+            PlaybackOperationError::content("decode_probe_failed", "bad media", true),
+        )
+        .expect("content failure should schedule auto-skip");
+
+        let mut runtime = state.lock().unwrap();
+        let action = runtime.prepare_content_auto_skip(&plan);
+
+        assert_eq!(
+            action,
+            TrackFinishAction::Start {
+                track_id: "good-track".to_string()
+            }
+        );
+        assert_eq!(runtime.playback_state.as_str(), "pre_quiet");
+        assert_eq!(runtime.current_track.as_deref(), Some("good-track"));
+        mark_current_track_first_frame(&mut runtime);
+        assert_eq!(runtime.history_log.entries.len(), 1);
+        assert_eq!(runtime.history_log.entries[0].track_uid, "good-track");
+    }
+
+    #[test]
+    fn content_error_auto_skip_stops_after_consecutive_limit() {
+        let mut state = RuntimeState::new();
+        state.apply_command(ipc_proto::PlaybackCommand::QueuePlay(vec![
+            "bad-track".to_string()
+        ]));
+
+        for _ in 0..MAX_CONSECUTIVE_CONTENT_AUTO_SKIPS {
+            let application = state
+                .apply_failure_state(
+                    "bad-track",
+                    &PlaybackOperationError::content("decode_probe_failed", "bad media", true),
+                )
+                .expect("failure should apply");
+            assert!(application.effective_keep_quiet);
+            assert!(application.auto_skip.is_some());
+            state.playback_state = ipc_proto::PlaybackState::PreQuiet;
+        }
+
+        let application = state
+            .apply_failure_state(
+                "bad-track",
+                &PlaybackOperationError::content("decode_probe_failed", "bad media", true),
+            )
+            .expect("failure should apply");
+        assert!(!application.effective_keep_quiet);
+        assert!(application.auto_skip.is_none());
+        assert_eq!(state.playback_state.as_str(), "stopped");
     }
 
     #[test]
@@ -3579,6 +4264,7 @@ mod tests {
             .expect_err("offline volume should fail preflight");
 
         assert_eq!(err.code, "track_volume_unavailable");
+        assert_eq!(err.class, PlaybackFailureClass::MediaOffline);
         assert!(!err.keep_quiet);
         cleanup_temp_path(&db_path);
     }
@@ -3652,6 +4338,7 @@ mod tests {
             .expect_err("missing file should fail preflight");
 
         assert_eq!(err.code, "track_file_missing");
+        assert_eq!(err.class, PlaybackFailureClass::MediaOffline);
         assert!(!err.keep_quiet);
         cleanup_temp_path(&db_path);
     }
@@ -3774,6 +4461,7 @@ mod tests {
     fn queue_remove_current_active_track_advances_and_records_history() {
         let mut state = RuntimeState::new();
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+        mark_current_track_first_frame(&mut state);
         state.apply_command(ipc_proto::PlaybackCommand::QueueAppend(
             "track-b".to_string(),
         ));
@@ -3783,7 +4471,8 @@ mod tests {
 
         assert_eq!(state.playback_state.as_str(), "quiet_active");
         assert_eq!(state.current_track.as_deref(), Some("track-b"));
-        assert!(outcome.persist_history);
+        assert!(!outcome.persist_history);
+        mark_current_track_first_frame(&mut state);
         assert_eq!(state.history_log.entries[0].track_uid, "track-b");
         assert_eq!(
             outcome.events,
@@ -3845,21 +4534,18 @@ mod tests {
             "track-y".to_string(),
         ]));
 
-        assert_eq!(state.playback_state.as_str(), "quiet_active");
+        assert_eq!(state.playback_state.as_str(), "pre_quiet");
         assert_eq!(state.current_track.as_deref(), Some("track-x"));
         assert_eq!(state.snapshot.play_order.len(), 2);
         assert_eq!(state.snapshot.current_order_index, Some(0));
+        assert!(state.history_log.entries.is_empty());
+        mark_current_track_first_frame(&mut state);
         assert_eq!(state.history_log.entries[0].track_uid, "track-x");
         assert_eq!(
             outcome.events,
-            vec![
-                ipc_proto::PlaybackEvent::PlayRequestAccepted {
-                    track_id: "track-x".to_string()
-                },
-                ipc_proto::PlaybackEvent::PlaybackStarted {
-                    track_id: "track-x".to_string()
-                }
-            ]
+            vec![ipc_proto::PlaybackEvent::PlayRequestAccepted {
+                track_id: "track-x".to_string()
+            }]
         );
     }
 
@@ -3923,7 +4609,7 @@ mod tests {
 
         assert_eq!(state.snapshot.repeat_mode, RepeatMode::All);
         assert_eq!(state.current_track.as_deref(), Some("track-a"));
-        assert_eq!(state.playback_state, ipc_proto::PlaybackState::QuietActive);
+        assert_eq!(state.playback_state, ipc_proto::PlaybackState::PreQuiet);
         assert!(outcome.persist_queue);
         assert!(!outcome.persist_history);
         assert!(outcome.events.is_empty());
@@ -3949,7 +4635,7 @@ mod tests {
             "history-track".to_string(),
         ));
 
-        assert_eq!(state.playback_state.as_str(), "quiet_active");
+        assert_eq!(state.playback_state.as_str(), "pre_quiet");
         assert_eq!(state.current_track.as_deref(), Some("history-track"));
         assert_eq!(state.snapshot.current_order_index, Some(1));
         assert_eq!(state.snapshot.play_order, play_order_before);
@@ -3974,19 +4660,16 @@ mod tests {
                 .map(|entry| entry.track_uid.as_str()),
             Some("track-c")
         );
+        assert!(state.history_log.entries.is_empty());
+        mark_current_track_first_frame(&mut state);
         assert_eq!(state.history_log.entries[0].track_uid, "history-track");
         assert!(outcome.persist_queue);
-        assert!(outcome.persist_history);
+        assert!(!outcome.persist_history);
         assert_eq!(
             outcome.events,
-            vec![
-                ipc_proto::PlaybackEvent::PlayRequestAccepted {
-                    track_id: "history-track".to_string()
-                },
-                ipc_proto::PlaybackEvent::PlaybackStarted {
-                    track_id: "history-track".to_string()
-                }
-            ]
+            vec![ipc_proto::PlaybackEvent::PlayRequestAccepted {
+                track_id: "history-track".to_string()
+            }]
         );
     }
 
@@ -3997,6 +4680,7 @@ mod tests {
         state.apply_command(ipc_proto::PlaybackCommand::QueueAppend(
             "track-b".to_string(),
         ));
+        state.playback_state = ipc_proto::PlaybackState::QuietActive;
 
         let action = state.finish_track_output("track-a");
 
@@ -4009,6 +4693,8 @@ mod tests {
         assert_eq!(state.playback_state.as_str(), "quiet_active");
         assert_eq!(state.current_track.as_deref(), Some("track-b"));
         assert_eq!(state.snapshot.current_order_index, Some(1));
+        assert!(state.history_log.entries.is_empty());
+        mark_current_track_first_frame(&mut state);
         assert_eq!(state.history_log.entries[0].track_uid, "track-b");
     }
 
@@ -4016,6 +4702,7 @@ mod tests {
     fn finished_track_stops_at_queue_end_when_repeat_is_off() {
         let mut state = RuntimeState::new();
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+        state.playback_state = ipc_proto::PlaybackState::QuietActive;
 
         let action = state.finish_track_output("track-a");
 
@@ -4233,6 +4920,7 @@ Playback:
 
         for index in 0..(HISTORY_LIMIT + 5) {
             state.apply_command(ipc_proto::PlaybackCommand::Play(format!("track-{index}")));
+            mark_current_track_first_frame(&mut state);
         }
 
         assert_eq!(state.history_log.entries.len(), HISTORY_LIMIT);
@@ -4248,7 +4936,9 @@ Playback:
         let path = temp_queue_path("history_round_trip");
         let mut state = RuntimeState::new();
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-a".to_string()));
+        mark_current_track_first_frame(&mut state);
         state.apply_command(ipc_proto::PlaybackCommand::Play("track-b".to_string()));
+        mark_current_track_first_frame(&mut state);
 
         persist_history_log(&path, &state.history_log).unwrap();
         let restored = load_history_log(&path).unwrap();
@@ -4258,6 +4948,42 @@ Playback:
         assert_eq!(restored.entries[1].track_uid, "track-a");
 
         cleanup_temp_path(&path);
+    }
+
+    #[test]
+    fn oversized_history_state_is_rejected() {
+        let path = temp_queue_path("history_too_large");
+        cleanup_temp_path(&path);
+        fs::write(&path, vec![b' '; MAX_STATE_FILE_BYTES as usize + 1]).unwrap();
+
+        let err = load_history_log(&path).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+
+        cleanup_temp_path(&path);
+    }
+
+    #[test]
+    fn read_command_line_rejects_overlong_input() {
+        let payload = format!("PLAY {}\n", "a".repeat(MAX_COMMAND_LINE_BYTES));
+        let mut reader = Cursor::new(payload.into_bytes());
+
+        let err = read_command_line(&mut reader).unwrap_err();
+        assert!(err.contains("command line too long"), "{err}");
+    }
+
+    #[test]
+    fn read_command_line_accepts_short_line() {
+        let mut reader = Cursor::new(b"STATUS\n".to_vec());
+
+        let line = read_command_line(&mut reader).unwrap().unwrap();
+        assert_eq!(line, "STATUS\n");
+    }
+
+    fn mark_current_track_first_frame(state: &mut RuntimeState) {
+        if state.playback_state == ipc_proto::PlaybackState::PreQuiet {
+            state.playback_state = ipc_proto::PlaybackState::QuietActive;
+        }
+        state.record_current_track_history();
     }
 
     fn shuffled_snapshot() -> QueueSnapshot {

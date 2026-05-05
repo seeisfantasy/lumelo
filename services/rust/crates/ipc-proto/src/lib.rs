@@ -252,6 +252,8 @@ pub enum PlaybackEvent {
         class: PlaybackFailureClass,
         recoverable: bool,
         keep_quiet: bool,
+        auto_skip_after_ms: Option<u64>,
+        queue_entry_id: Option<String>,
     },
 }
 
@@ -259,6 +261,7 @@ pub enum PlaybackEvent {
 pub enum PlaybackFailureClass {
     Output,
     Content,
+    MediaOffline,
 }
 
 impl PlaybackFailureClass {
@@ -266,6 +269,7 @@ impl PlaybackFailureClass {
         match self {
             Self::Output => "output",
             Self::Content => "content",
+            Self::MediaOffline => "media_offline",
         }
     }
 
@@ -273,6 +277,7 @@ impl PlaybackFailureClass {
         match raw {
             "output" => Some(Self::Output),
             "content" => Some(Self::Content),
+            "media_offline" => Some(Self::MediaOffline),
             _ => None,
         }
     }
@@ -450,13 +455,27 @@ pub fn format_event_line(event: &PlaybackEvent) -> String {
             class,
             recoverable,
             keep_quiet,
-        } => format!(
-            "EVENT\tname=PLAYBACK_FAILED\treason={}\tclass={}\trecoverable={}\tkeep_quiet={}",
-            sanitize_field_value(reason),
-            class.as_str(),
-            recoverable,
-            keep_quiet
-        ),
+            auto_skip_after_ms,
+            queue_entry_id,
+        } => {
+            let mut line = format!(
+                "EVENT\tname=PLAYBACK_FAILED\treason={}\tclass={}\trecoverable={}\tkeep_quiet={}",
+                sanitize_field_value(reason),
+                class.as_str(),
+                recoverable,
+                keep_quiet
+            );
+            if let Some(delay) = auto_skip_after_ms {
+                line.push_str(&format!("\tauto_skip_after_ms={delay}"));
+            }
+            if let Some(queue_entry_id) = queue_entry_id {
+                line.push_str(&format!(
+                    "\tqueue_entry_id={}",
+                    sanitize_field_value(queue_entry_id)
+                ));
+            }
+            line
+        }
     }
 }
 
@@ -582,6 +601,8 @@ pub fn parse_event_line(line: &str) -> Result<PlaybackEvent, ProtocolError> {
                 .ok_or_else(|| ProtocolError::new("invalid_class", "invalid failure class"))?,
             recoverable: parse_bool_field(require_field(&fields, "recoverable")?)?,
             keep_quiet: parse_bool_field(require_field(&fields, "keep_quiet")?)?,
+            auto_skip_after_ms: optional_u64_field(&fields, "auto_skip_after_ms")?,
+            queue_entry_id: optional_string_field(&fields, "queue_entry_id"),
         }),
         _ => Err(ProtocolError::new(
             "unknown_event",
@@ -724,6 +745,25 @@ fn parse_bool_field(raw: &str) -> Result<bool, ProtocolError> {
             format!("invalid boolean value: {raw}"),
         )),
     }
+}
+
+fn optional_u64_field(fields: &[(&str, &str)], key: &str) -> Result<Option<u64>, ProtocolError> {
+    let Some(value) = fields
+        .iter()
+        .find_map(|(field_key, value)| (*field_key == key).then_some(*value))
+    else {
+        return Ok(None);
+    };
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|err| ProtocolError::new("invalid_u64", format!("invalid {key}: {err}")))
+}
+
+fn optional_string_field(fields: &[(&str, &str)], key: &str) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|(field_key, value)| (*field_key == key).then_some((*value).to_string()))
 }
 
 fn optional_field(value: Option<&str>) -> String {
@@ -952,6 +992,8 @@ mod tests {
             class: PlaybackFailureClass::Output,
             recoverable: false,
             keep_quiet: false,
+            auto_skip_after_ms: Some(6000),
+            queue_entry_id: Some("q12".to_string()),
         };
 
         let encoded = format_event_line(&original);

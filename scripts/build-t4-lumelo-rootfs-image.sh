@@ -503,6 +503,10 @@ install -m 0755 "${STAGE_DIR}/bin/controld" "${ROOTFS_MOUNT}/usr/bin/controld"
 rsync -a \
   --exclude='._*' \
   --exclude='.DS_Store' \
+  --exclude='__pycache__/' \
+  --exclude='.pytest_cache/' \
+  --exclude='*.pyc' \
+  --exclude='*~' \
   "${overlay_root}/" \
   "${ROOTFS_MOUNT}/"
 

@@ -17,8 +17,6 @@
   - 维护当前经典蓝牙配网协议、保留 BLE 诊断范围和安全传输契约
 - [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)
   - 维护每天真实发生的开发过程
-- [archive/Android_Provisioning_App_MVP.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Android_Provisioning_App_MVP.md)
-  - 保留 APK 初版目标和历史 MVP 边界，仅作历史参考
 - 本文件
   - 维护“当前 APK 做到了什么、接下来怎么开发、结构如何拆分”
 
@@ -208,7 +206,8 @@ V1 的 steady-state 主交互仍然是：
     - 默认入口：`http://lumelo.local/`
     - 可靠入口：`http://<T4_IP>/`
     - 放弃入口：`http://lumelo/`
-  - 待开发 P0：配网成功后 APK 先用短超时 probe `http://lumelo.local/healthz`；成功则打开 `.local`，失败则打开 provisioning status 返回的 IP URL。
+  - 2026-05-05 已实现 P0：配网成功后 APK 先用短超时 probe `http://lumelo.local/healthz`；成功则打开 `.local`，失败则打开 provisioning status 返回的 IP URL。
+  - 尚未构建新版 APK / 安装到手机 / 真机验证 `.local` success 与 fallback 两条路径；当前 Mac 环境缺 Java Runtime，`./gradlew :app:assembleDebug` 无法启动。
 - 但下面两类分支还没做专门现场回归：
   - 人工制造的 `ack timeout / write failed / auto reconnect`
   - 新手机首次 classic 首配、完全拿不到稳定 `nameMatch` 时的候选判断
@@ -537,4 +536,3 @@ V1 的 steady-state 主交互仍然是：
 - [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
 - [apps/android-provisioning/README.md](/Volumes/SeeDisk/Codex/Lumelo/apps/android-provisioning/README.md)
 - [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)
-- [archive/Android_Provisioning_App_MVP.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Android_Provisioning_App_MVP.md)

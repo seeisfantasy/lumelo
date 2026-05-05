@@ -690,14 +690,28 @@
         const transportPrimaryAction = (state) => transportIsPauseState(state) ? "pause" : "play";
         const transportPrimaryLabel = (state) => transportIsPauseState(state) ? "暂停" : "播放";
 
-        const pillMarkupForPlaybackState = (state) => {
+        const createPlaybackStatePill = (state) => {
+          const pill = document.createElement("span");
           if (state === "quiet_active") {
-            return '<span class="pill pill-playing">播放中</span>';
+            pill.className = "pill pill-playing";
+            pill.textContent = "播放中";
+            return pill;
           }
           if (state === "paused") {
-            return '<span class="pill pill-paused">已暂停</span>';
+            pill.className = "pill pill-paused";
+            pill.textContent = "已暂停";
+            return pill;
           }
-          return `<span class="pill pill-current">${playbackStateLabel(state)}</span>`;
+          pill.className = "pill pill-current";
+          pill.textContent = playbackStateLabel(state);
+          return pill;
+        };
+
+        const renderPlaybackStatePill = (slot, state, visible) => {
+          slot.replaceChildren();
+          if (visible) {
+            slot.appendChild(createPlaybackStatePill(state));
+          }
         };
 
         const findNowPlaying = (playbackStatus, queueSnapshot, librarySnapshot) => {
@@ -735,21 +749,32 @@
           };
         };
 
-        const contextHiddenInputs = (trackUID) => {
-          const parts = [];
+        const appendHiddenInput = (form, name, value, configure = null) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = name;
+          input.value = value;
+          if (configure) {
+            configure(input);
+          }
+          form.appendChild(input);
+        };
+
+        const appendContextHiddenInputs = (form, trackUID) => {
           if (pageContext.albumUID) {
-            parts.push(`<input type="hidden" name="album_uid" value="${pageContext.albumUID}">`);
+            appendHiddenInput(form, "album_uid", pageContext.albumUID);
           }
           if (pageContext.directoryVolumeUUID) {
-            parts.push(`<input type="hidden" name="volume_uuid" value="${pageContext.directoryVolumeUUID}">`);
+            appendHiddenInput(form, "volume_uuid", pageContext.directoryVolumeUUID);
           }
           if (pageContext.directoryPath) {
-            parts.push(`<input type="hidden" name="directory" value="${pageContext.directoryPath}">`);
+            appendHiddenInput(form, "directory", pageContext.directoryPath);
           }
           if (trackUID) {
-            parts.push(`<input type="hidden" name="track_id" value="${trackUID}" data-library-transport-track-id>`);
+            appendHiddenInput(form, "track_id", trackUID, (input) => {
+              input.dataset.libraryTransportTrackId = "";
+            });
           }
-          return parts.join("");
         };
 
         const refreshLibraryTransportControls = (playbackStatus, nowPlaying) => {
@@ -774,7 +799,7 @@
             if (!slot) {
               return;
             }
-            slot.innerHTML = isCurrent ? pillMarkupForPlaybackState(playbackStatus.state) : "";
+            renderPlaybackStatePill(slot, playbackStatus.state, Boolean(isCurrent));
           });
         };
 
@@ -799,14 +824,28 @@
           container.hidden = false;
           container.classList.toggle("now-playing-active", playbackStatus.state === "quiet_active");
           title.textContent = nowPlaying.title;
-          pill.innerHTML = pillMarkupForPlaybackState(playbackStatus.state);
+          renderPlaybackStatePill(pill, playbackStatus.state, true);
 
           artist.hidden = !nowPlaying.artist;
           artist.textContent = nowPlaying.artist || "";
           path.hidden = !nowPlaying.relativePath;
           path.textContent = nowPlaying.relativePath || "";
 
-          actions.innerHTML = `${contextHiddenInputs(nowPlaying.trackUID)}<button type="submit" name="action" value="${transportPrimaryAction(playbackStatus.state)}" data-library-transport-primary>${transportPrimaryLabel(playbackStatus.state)}</button><button type="submit" name="action" value="stop">停止</button>`;
+          actions.replaceChildren();
+          appendContextHiddenInputs(actions, nowPlaying.trackUID);
+          const primaryButton = document.createElement("button");
+          primaryButton.type = "submit";
+          primaryButton.name = "action";
+          primaryButton.value = transportPrimaryAction(playbackStatus.state);
+          primaryButton.dataset.libraryTransportPrimary = "";
+          primaryButton.textContent = transportPrimaryLabel(playbackStatus.state);
+          actions.appendChild(primaryButton);
+          const stopButton = document.createElement("button");
+          stopButton.type = "submit";
+          stopButton.name = "action";
+          stopButton.value = "stop";
+          stopButton.textContent = "停止";
+          actions.appendChild(stopButton);
           refreshLibraryTransportControls(playbackStatus, nowPlaying);
         };
 
@@ -1138,7 +1177,7 @@
 
           if (pageContext.directoryVolumeUUID) {
             context.className = "banner banner-ok";
-            context.innerHTML = "";
+            context.replaceChildren();
             context.append(`当前文件夹：${selectedDirectoryTitle()}`);
             context.appendChild(document.createTextNode(" "));
             const link = document.createElement("a");
@@ -1205,7 +1244,7 @@
 
           if (pageContext.albumUID) {
             context.className = "banner banner-ok";
-            context.innerHTML = "";
+            context.replaceChildren();
             context.append(`当前专辑：${selectedAlbumTitle(librarySnapshot)}`);
             context.appendChild(document.createTextNode(" "));
             const link = document.createElement("a");
@@ -1355,7 +1394,7 @@
             title.appendChild(titleText);
             const slot = document.createElement("span");
             slot.className = "track-state-pill-slot";
-            slot.innerHTML = isCurrent ? pillMarkupForPlaybackState(playbackStatus.state) : "";
+            renderPlaybackStatePill(slot, playbackStatus.state, Boolean(isCurrent));
             title.appendChild(slot);
             main.appendChild(title);
 

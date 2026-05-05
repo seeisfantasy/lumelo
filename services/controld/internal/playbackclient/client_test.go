@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,6 +178,15 @@ func TestPlayQueueFormatsQueuePlayCommand(t *testing.T) {
 	}
 
 	<-done
+}
+
+func TestExecuteRejectsOverlongCommandLineBeforeDial(t *testing.T) {
+	client := New("/tmp/does-not-exist.sock", "")
+
+	_, err := client.Execute(context.Background(), "play", strings.Repeat("a", maxCommandLineBytes+1))
+	if err == nil || !strings.Contains(err.Error(), "playback command line too long") {
+		t.Fatalf("expected command length error, got %v", err)
+	}
 }
 
 func TestExecuteFormatsPlaybackModeCommands(t *testing.T) {

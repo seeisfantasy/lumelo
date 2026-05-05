@@ -1,0 +1,13 @@
+[Unit]
+Description=Lumelo Mode Manager
+Documentation=file:/etc/lumelo/config.toml file:/usr/share/lumelo/default_config.toml
+After=local-fs.target
+ConditionPathExists=/usr/libexec/lumelo/mode-manager
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/lumelo/mode-manager
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -361,7 +361,11 @@ orb -m lumelo-dev -u root /bin/sh -lc '
 
 - Wi-Fi 驱动走 `bcmdhd`
 - 蓝牙走 `hci_uart + btbcm`
+- 板载无线为 `AP6356S`
 - 蓝牙控制器挂在 `ttyS0`
+- 官方 Wi-Fi firmware 路径是：
+  - `/system/etc/firmware/fw_bcm4356a2_ag.bin`
+  - `/system/etc/firmware/nvram_ap6356.txt`
 - 蓝牙 patch 文件是：
   - `/etc/firmware/BCM4356A2.hcd`
 - 模块策略文件是：
@@ -380,9 +384,23 @@ orb -m lumelo-dev -u root /bin/sh -lc '
   - `bluetooth-uart-attach` 是否按 `bcmdhd` 就绪条件等待
 - 若未来确实要偏离官方金样，必须先在 [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md) 明确记录原因与验证结果
 
-更细的 Wi-Fi 金样基线与和 `Lumelo` 当前实现的差异，单独维护在：
+官方金样用户态网络栈与 `Lumelo` 当前实现仍不同：
 
-- [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)
+- 官方金样观察到 `NetworkManager`、`ifupdown`、`dhcpcd-base`、`wireless-tools`、`wpa_supplicant`。
+- 官方金样 `NetworkManager.service` 默认 enabled，`systemd-networkd.service` 默认 disabled。
+- 官方金样 `NetworkManager` 配置要点：
+  - `/etc/NetworkManager/NetworkManager.conf` 使用 `plugins=ifupdown,keyfile` 且 `[ifupdown] managed=true`
+  - `12-managed-wifi.conf` 使用 `unmanaged-devices=wl*,except:type:wifi`
+  - `99-unmanaged-wlan1.conf` 使用 `unmanaged-devices=interface-name:wlan1`
+  - `disable-random-mac-during-wifi-scan.conf` 使用 `wifi.scan-rand-mac-address=no`
+  - `/etc/network/interfaces` 只 source `/etc/network/interfaces.d/*`
+- `Lumelo` 当前仍以 `systemd-networkd + wpa_supplicant` 路径为主，`lumelo-wifi-apply` 支持 `NetworkManager` / `wpa_supplicant` backend auto。
+
+判断规则：
+
+- 板级 firmware / driver 必须继承官方 vendor 路线。
+- 用户态网络策略可以保持 `Lumelo` 自己的路线。
+- 后续若 Wi-Fi 连接、DHCP、重连或扫描仍不稳定，不能只归因 firmware；必须同时检查是否需要把 `NetworkManager` 设为 T4 默认 backend。
 
 ### 7.2.2 T4 在线更新开发回路
 
@@ -536,8 +554,6 @@ env LUMELO_T4_SSH_OPTIONS='-o StrictHostKeyChecking=accept-new -o UserKnownHosts
   - 当前 APK 功能结构、进度状态、后续开发计划
 - [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
   - 当前板端与手机 APK 的配网协议、经典蓝牙传输约定与安全策略
-- [archive/Android_Provisioning_App_MVP.md](/Volumes/SeeDisk/Codex/Lumelo/docs/archive/Android_Provisioning_App_MVP.md)
-  - APK 初版目标定义，保留作历史参考
 
 ## 9. 文档边界
 
@@ -549,3 +565,11 @@ env LUMELO_T4_SSH_OPTIONS='-o StrictHostKeyChecking=accept-new -o UserKnownHosts
   - 软件环境、开发环境、宿主机文件系统与搭建约定
 - [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)
   - 每一步实际开发进度与环境调整记录
+
+外部 AI 静态审查文档不再作为长期 docs 维护。需要时运行：
+
+```sh
+python3 scripts/build-ai-review-docs.py
+```
+
+脚本会重新生成 `docs/review/`，该目录是 generated bundle，不提交、不作为权威文档。

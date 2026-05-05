@@ -71,6 +71,9 @@ public class MainActivity extends Activity {
     private static final String PREF_LAST_T4_SSID = "last_t4_ssid";
     private static final String PREF_LAST_CLASSIC_ADDRESS = "last_classic_address";
     private static final String PREF_LAST_CLASSIC_NAME = "last_classic_name";
+    private static final String PREF_LAST_LUMELO_LOCAL_SUPPORTED = "last_lumelo_local_supported";
+    private static final String LUMELO_LOCAL_BASE_URL = "http://lumelo.local/";
+    private static final String LUMELO_LOCAL_HEALTHZ_URL = "http://lumelo.local/healthz";
     private enum ScanMode {
         LUMELO,
         GENERIC_TEST
@@ -158,8 +161,10 @@ public class MainActivity extends Activity {
     private volatile String lastWebUiProbeSummary = "";
     private volatile String lastSubnetScanSummary = "";
     private long classicFailureProbeSerial;
+    private long webEntryProbeSerial;
     private long statusPollingDeadlineMs;
     private boolean statusPollingActive;
+    private boolean webEntryResolvedForSession;
     private final ArrayDeque<String> debugLines = new ArrayDeque<>();
     private String lastLoggedMessage = "";
     private final Runnable statusPollingRunnable = new Runnable() {
@@ -2080,10 +2085,18 @@ public class MainActivity extends Activity {
         }
         appendReportLine(builder, "Last known T4 Wi-Fi", rememberedT4Ssid());
         appendReportLine(builder, "Last known WebUI", currentKnownWebUiUrl());
+        appendReportLine(builder, "lumelo.local supported", rememberedLumeloLocalSupportLabel());
         appendReportLine(builder, "WebUI probe", sanitize(lastWebUiProbeSummary));
         appendReportLine(builder, "Subnet scan", sanitize(lastSubnetScanSummary));
         appendReportLine(builder, "Classic Session", buildClassicSessionSummary());
         return builder.toString();
+    }
+
+    private String rememberedLumeloLocalSupportLabel() {
+        if (!prefs().contains(PREF_LAST_LUMELO_LOCAL_SUPPORTED)) {
+            return "unknown";
+        }
+        return prefs().getBoolean(PREF_LAST_LUMELO_LOCAL_SUPPORTED, false) ? "yes" : "no";
     }
 
     private void appendReportLine(StringBuilder builder, String label, String value) {
@@ -2462,6 +2475,7 @@ public class MainActivity extends Activity {
 
     private void resetProvisioningSession() {
         cancelClassicFailureProbe();
+        cancelWebEntryProbe();
         stopStatusPolling();
         deviceInfoCharacteristic = null;
         wifiCredentialsCharacteristic = null;
@@ -2469,6 +2483,7 @@ public class MainActivity extends Activity {
         statusCharacteristic = null;
         webUrl = rememberedWebUiUrl();
         mainInterfaceOpenedForSession = false;
+        webEntryResolvedForSession = false;
         writeQueue.clear();
         writeInFlight = false;
         connectionMode = ConnectionMode.LUMELO;
@@ -2491,13 +2506,56 @@ public class MainActivity extends Activity {
         if (!"connected".equals(state) || mainInterfaceOpenedForSession || webUrl == null || webUrl.isEmpty()) {
             return false;
         }
-        if (!shouldAutoOpenWebUi()) {
+        if (webEntryResolvedForSession) {
             return false;
         }
-        mainInterfaceOpenedForSession = true;
-        logEvent("Opening Lumelo main interface");
-        openInAppUrl(webUrl);
-        return true;
+        webEntryResolvedForSession = true;
+        boolean autoOpen = shouldAutoOpenWebUi();
+        if (autoOpen) {
+            mainInterfaceOpenedForSession = true;
+        }
+        resolvePreferredWebEntryAsync(webUrl, autoOpen);
+        return autoOpen;
+    }
+
+    private synchronized long cancelWebEntryProbe() {
+        webEntryProbeSerial += 1;
+        return webEntryProbeSerial;
+    }
+
+    private void resolvePreferredWebEntryAsync(String fallbackUrl, boolean openAfterProbe) {
+        String normalizedFallback = sanitize(fallbackUrl);
+        if (normalizedFallback.isEmpty()) {
+            return;
+        }
+        final long probeSerial = cancelWebEntryProbe();
+        setStatus("T4 connected. Checking http://lumelo.local/ ...");
+        logEvent("Probing default WebUI entry " + LUMELO_LOCAL_HEALTHZ_URL);
+        new Thread(() -> {
+            boolean localReachable = probeLumeloHealthzUrl(LUMELO_LOCAL_HEALTHZ_URL, WEBUI_PROBE_TIMEOUT_MS);
+            synchronized (this) {
+                if (probeSerial != webEntryProbeSerial) {
+                    return;
+                }
+            }
+            String selectedUrl = localReachable ? LUMELO_LOCAL_BASE_URL : normalizedFallback;
+            String summary = localReachable
+                    ? "lumelo.local reachable; using default entry"
+                    : "lumelo.local unreachable; using reliable IP entry";
+            lastWebUiProbeSummary = summary;
+            prefs().edit().putBoolean(PREF_LAST_LUMELO_LOCAL_SUPPORTED, localReachable).apply();
+            runOnUiThread(() -> {
+                rememberReportedWebUiUrl(selectedUrl);
+                String status = localReachable
+                        ? "T4 connected. Default entry http://lumelo.local/ works on this phone."
+                        : "T4 connected. http://lumelo.local/ is not reachable on this phone; using " + normalizedFallback;
+                setStatus(status);
+                if (openAfterProbe) {
+                    logEvent("Opening Lumelo main interface via " + selectedUrl);
+                    openInAppUrl(selectedUrl);
+                }
+            });
+        }, "LumeloLocalProbe").start();
     }
 
     private void openInAppUrl(String url) {
@@ -2824,13 +2882,16 @@ public class MainActivity extends Activity {
     }
 
     private boolean probeLumeloHealthzHost(String host) {
-        String url = "http://" + host + "/healthz";
+        return probeLumeloHealthzUrl("http://" + host + "/healthz", WEBUI_SUBNET_SCAN_TIMEOUT_MS);
+    }
+
+    private boolean probeLumeloHealthzUrl(String url, int timeoutMs) {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) new URL(url).openConnection();
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(WEBUI_SUBNET_SCAN_TIMEOUT_MS);
-            connection.setReadTimeout(WEBUI_SUBNET_SCAN_TIMEOUT_MS);
+            connection.setConnectTimeout(timeoutMs);
+            connection.setReadTimeout(timeoutMs);
             connection.setUseCaches(false);
             connection.connect();
             int code = connection.getResponseCode();
@@ -2839,7 +2900,6 @@ public class MainActivity extends Activity {
             }
             String body = readResponseBody(connection);
             return body.contains("\"status\":\"ok\"")
-                    && body.contains("\"mode\":\"local\"")
                     && body.contains("\"provisioning_available\":true");
         } catch (IOException exception) {
             return false;

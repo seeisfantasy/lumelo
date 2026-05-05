@@ -52,3 +52,48 @@ func TestLoadRejectsInvalidBool(t *testing.T) {
 		t.Fatalf("Load() error = nil, want parse error")
 	}
 }
+
+func TestValidateRejectsUnsupportedMode(t *testing.T) {
+	cfg := Default()
+	cfg.Mode = "airplay"
+	if err := Validate(cfg); err == nil {
+		t.Fatalf("Validate() error = nil, want invalid mode")
+	}
+}
+
+func TestSaveAtomicRoundTripsConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.toml")
+	cfg := Config{
+		Mode:          "bridge",
+		InterfaceMode: "wifi",
+		DSDPolicy:     "dop",
+		SSHEnabled:    true,
+		ConfigPath:    configPath,
+	}
+
+	if err := SaveAtomic(configPath, cfg); err != nil {
+		t.Fatalf("SaveAtomic(): %v", err)
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if loaded.Mode != "bridge" || loaded.InterfaceMode != "wifi" || loaded.DSDPolicy != "dop" || !loaded.SSHEnabled {
+		t.Fatalf("loaded config mismatch: %+v", loaded)
+	}
+}
+
+func TestRequiresRebootIgnoresSSHOnlyChanges(t *testing.T) {
+	current := Default()
+	next := current
+	next.SSHEnabled = !current.SSHEnabled
+	if RequiresReboot(current, next) {
+		t.Fatalf("SSH-only changes should not require reboot")
+	}
+	next.Mode = "bridge"
+	if !RequiresReboot(current, next) {
+		t.Fatalf("mode change should require reboot")
+	}
+}

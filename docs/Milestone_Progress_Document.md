@@ -24,6 +24,24 @@
 
 ## 2. 版本规划
 
+### 2.0 当前 M1 修复队列
+
+后续按下面顺序一条条收口。每完成一条，必须同步本表状态、开发日志和最小验证结果。
+
+| 顺序 | 条目 | 优先级 | 当前状态 | 下一步 |
+| --- | --- | --- | --- | --- |
+| 1 | WebUI auth / first password / session / CSRF | P0 | 本地闭环已落地；auth recovery 和登录限速已补；尚未 live T4 验证 | 真机 runtime update 验证 first setup、login、未登录 API 拒绝、same-origin POST、recovery marker |
+| 2 | mode manager | P0 | 最小启动期 manager 已落地；settings commit/reboot UI 已接入；尚未 live T4 验证 | 真机验证 `mode=local` / `mode=bridge` boot target 行为 |
+| 3 | `PLAYBACK_STARTED` first-frame 语义 | P0 | 本地语义已修，尚未真机 ALSA 验证 | live T4 验证 WAV / FLAC / DSD 首帧后才进入 `quiet_active` |
+| 4 | Quiet Mode 服务切换 | P0 | 最小闭环已落地，尚未 live T4 验证 | 真机验证播放中 provisioning / media worker / mDNS-DNS-SD 被抑制，停止后按 snapshot 恢复 |
+| 5 | Android APK `.local` resolver probe | P0 | 代码已落地并完成 debug build；尚未手机实测 | 安装新版 APK，用手机验证 `.local` success/fallback |
+| 6 | 内容错误恢复 | P1 | 核心状态机已落地，尚未 live T4 验证；IPC 扩展字段仍待补 | 真机验证坏文件 `quiet_error_hold`、6 秒 auto-skip、连续上限、用户取消 |
+| 7 | settings 写入 / pending reboot | P1 | API / 设置页表单 / 特权 SSH helper 已落地；尚未 live T4 验证 | 真机设置页人工回归和 reboot flow 验证 |
+| 8 | media offline 状态机 | P1 | 最小分类已落地，尚未 live T4 验证；UI badge / RAM Window 行为未完成 | 真机拔 TF/USB 验证 `media_offline` fail-stop，不 auto-skip / 不重扫 |
+| 9 | RAM Window design lock | P1 | 设计已锁定，MVP 实现放 M2 | M2 按 current+next raw-file RAM source 实现，不回退 direct path |
+| 10 | 最低 runtime 权限边界 | P1 | 最小 runtime 边界和 image verify 检查已落地，non-root/systemd hardening 留后续 | 真机验证服务互通 |
+| 11 | M1 bug 池剩余项 | P1/P2 | P1 已收口；分页、full systemd hardening 属 P2/M2+ | 后续按 M2/M3 继续 |
+
 ### 2.1 M1：V1 Architecture Recovery
 
 目标：
@@ -119,7 +137,7 @@ V2 前置条件：
 
 - V1 Local Mode 已稳定。
 - `mode manager` 已能保证 Bridge 不污染 Local Mode。
-- `Audio_Output_Device_Plan.md` 中 V2 语义已确认。
+- `Product_Development_Manual.md` 中 V2 多解码器选择语义已确认。
 
 ## 3. M1 需求池
 
@@ -128,6 +146,7 @@ V2 前置条件：
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：本地闭环已落地，2026-05-05；尚未 live T4 验证
 
 功能描述：
 
@@ -140,10 +159,14 @@ V2 前置条件：
 
 当前偏差：
 
-- `services/controld/internal/auth/auth.go` 只有 `passwordConfigured bool`。
-- `services/controld/cmd/controld/main.go` 固定 `auth.NewService(false)`。
-- 控制 API 和日志 API 当前未鉴权。
-- `auth-recovery` 仍是 placeholder。
+- `services/controld/internal/auth/auth.go` 已具备 file-backed password hash、session 和 route gate。
+- `services/controld/cmd/controld/main.go` 已改为 `auth.NewFileService(...)`。
+- 控制 API、日志 API、WebUI 页面已接入登录 gate。
+- state-changing POST 已接入 same-origin `Origin/Referer` 检查。
+- `auth-recovery` 已实现 physical marker reset。
+- 登录失败限速已接入 `auth.Service.Authenticate()`。
+- 登录失败限速仍待补。
+- 尚未在 live T4 验证 first setup / login / logout / API auth 行为。
 
 骨架框架：
 
@@ -189,6 +212,7 @@ V2 前置条件：
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：本地语义已修，2026-05-05；尚未 live T4 ALSA 验证
 
 功能描述：
 
@@ -199,9 +223,11 @@ V2 前置条件：
 
 当前偏差：
 
-- `playbackd` 当前在 command outcome 中同时发 `PLAY_REQUEST_ACCEPTED` 和 `PLAYBACK_STARTED`。
-- `derive_output_action()` 又根据 `PLAYBACK_STARTED` 才启动输出。
-- 因此 `PLAYBACK_STARTED` 的真实时机早于 ALSA 第一帧。
+- `playbackd` 已改为 command outcome 只发 `PLAY_REQUEST_ACCEPTED`，进入 `pre_quiet`。
+- `derive_output_action()` 已改为由 `PLAY_REQUEST_ACCEPTED` 启动输出。
+- `PLAYBACK_STARTED` 由 output streaming path 在第一次写入音频 payload 后发出。
+- WAV direct `aplay file.wav` 已改为 pipe 化 `aplay -t wav -` transport。
+- 尚未在 live T4 ALSA 上验证真实第一帧时机。
 
 骨架框架：
 
@@ -240,6 +266,7 @@ V2 前置条件：
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：最小闭环已落地，2026-05-05；尚未 live T4 验证
 
 功能描述：
 
@@ -249,8 +276,10 @@ V2 前置条件：
 
 当前偏差：
 
-- `sessiond.env` 有 `SESSIOND_FREEZABLE_SERVICES="media-indexd.service"`，但 `sessiond` 当前只读取并打印，没有实际 stop/freeze。
-- `SESSIOND_QUIET_STOP_UNITS` 会 stop Bluetooth provisioning 相关 unit，但需要 live 验证和失败处理。
+- 已修复本地实现偏差：`SESSIOND_FREEZABLE_SERVICES` 现在真实参与 Quiet Mode reconcile。
+- 已修复恢复语义偏差：退出 Quiet Mode 时只恢复进入前 active 的 unit，不再无条件 start 固定列表。
+- 已修复 mDNS 抑制缺口：Quiet Mode 进入时通过 `resolvectl mdns <iface> no` 抑制 mDNS/DNS-SD，退出时按 snapshot 恢复。
+- 尚未 live T4 验证真实 unit 状态和 `resolvectl mdns` 行为。
 
 骨架框架：
 
@@ -286,11 +315,25 @@ V2 前置条件：
 - 停止播放后 provisioning service 恢复到可配网状态。
 - `controld` 和 SSH 不被停止。
 
+已验证：
+
+- `cargo fmt`
+- `cargo test -p sessiond`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机验证：
+  - `lumelo-wifi-provisiond.service` / `lumelo-bluetooth-provisioning.service` / `media-indexd.service` 在播放中 inactive。
+  - `resolvectl mdns <iface>` 在 Quiet Mode 中变为 `no`，停止后恢复进入前状态。
+  - `controld.service`、`playbackd.service`、`sessiond.service`、SSH 不被误停。
+
 ### REQ-P0-004：mode manager 最小闭环
 
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：最小闭环已落地，2026-05-05；尚未 live T4 验证
 
 功能描述：
 
@@ -301,9 +344,10 @@ V2 前置条件：
 
 当前偏差：
 
-- postbuild 静态启用 `local-mode.target`。
-- `bridge-mode.target` 存在，但没有按 config 选择 target 的启动逻辑。
-- `controld` 只读取 mode，不提供保存/确认/重启路径。
+- postbuild 已改为启用 `lumelo-mode-manager.service`，不再静态启用 `local-mode.target`。
+- `lumelo-mode-manager.service` 已按 config 选择 `local-mode.target` 或 `bridge-mode.target`。
+- `bridge-mode.target` 已保留 `controld`，且 `controld.service` 不再 hard-require `playbackd.service`。
+- `controld` settings API 和设置页已提供 validate -> confirm -> commit -> reboot request 路径。
 
 骨架框架：
 
@@ -338,6 +382,7 @@ V2 前置条件：
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：已修复，2026-05-05；尚未 live T4 验证
 
 功能描述：
 
@@ -345,9 +390,13 @@ V2 前置条件：
 - 资源超限时返回明确错误，不允许拖挂 `controld` 或 `playbackd`。
 - 这是认证之外的基础安全边界。
 
-当前偏差：
+当前实现：
 
-- HTTP request body、form post、SSE subscriber、UDS command line、candidate list 长度等边界尚未形成统一 contract。
+- `controld` HTTP server 已设置 header/read/write/idle timeout。
+- mutating HTTP body 默认限制 1 MiB，login/setup form 限制 4 KiB。
+- Web playback SSE subscriber 限制为 8。
+- `playbackd` UDS command line 限制 64 KiB，event subscriber 限制 16。
+- remote track id 限长 512 bytes，library candidate list 限制 500。
 
 骨架框架：
 
@@ -384,15 +433,19 @@ V2 前置条件：
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：release 默认安全矩阵已落地，2026-05-05；dev profile 扩展留后续
 
 功能描述：
 
 - 开发 / bring-up 镜像和正式镜像允许有不同暴露面，但差异必须写成 profile 并可验证。
 - release image 默认收紧；dev image 保留无头排障能力。
 
-当前偏差：
+当前实现：
 
-- `/healthz`、`/provisioning-status`、`/logs`、`/logs.txt`、SSH 的 dev/release 暴露策略尚未形成统一配置。
+- `/healthz` 始终匿名。
+- 未设置管理员密码时，仅 `GET /provisioning-status` 和 `GET /api/v1/provisioning/status` 作为 setup-phase exception。
+- 密码设置后，logs、settings、playback/library commands 均需要登录。
+- SSH 默认跟随 `config.toml`，release 默认 `ssh_enabled=false`。
 
 骨架框架：
 
@@ -474,6 +527,7 @@ V2 前置条件：
 类型：requirement
 优先级：P0
 所属里程碑：M1
+状态：代码已落地并完成 debug build，2026-05-05；尚未手机实测
 
 功能描述：
 
@@ -487,8 +541,9 @@ V2 前置条件：
 
 当前偏差：
 
-- APK 当前主要信任 provisioning status 的 IP URL。
-- 尚未记录“当前手机是否支持浏览器/WebView 直接访问 `.local`”这个能力位。
+- 已修复代码偏差：APK `connected` 后先 probe `http://lumelo.local/healthz`，再选择 `.local` 或 IP URL。
+- 已修复诊断缺口：APK diagnostics 记录最近一次 `.local supported: yes/no/unknown`。
+- 尚未真机验证支持 `.local` 和不支持 `.local` 两种手机路径。
 
 骨架框架：
 
@@ -520,6 +575,20 @@ V2 前置条件：
 - 支持 `.local` 的手机：APK 默认打开 `http://lumelo.local/`。
 - 不支持 `.local` 的手机：APK 自动打开 `http://<T4_IP>/`，且 UI 明确说明 fallback 原因。
 - 开飞行模式、VPN、移动数据干扰等场景时，probe 失败不能阻塞 IP 入口。
+
+已验证：
+
+- 静态检查代码路径。
+
+未通过验证：
+
+- `./gradlew :app:assembleDebug`
+  - 本机缺 Java Runtime：`Unable to locate a Java Runtime`。
+
+尚未验证：
+
+- 尚未安装新版 APK 到手机。
+- 尚未真机验证 `.local` probe success / fallback。
 - `http://lumelo/` 不出现在 APK 文案、代码路径或验收用例中。
 
 ### REQ-P1-001：queue/order/repeat 控制面补齐
@@ -527,6 +596,7 @@ V2 前置条件：
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：已修复，2026-05-05；live T4 / image verify 未完成
 
 功能描述：
 
@@ -591,6 +661,7 @@ V2 前置条件：
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：核心状态机和 IPC 扩展字段已落地，2026-05-05；尚未 live T4 验证
 
 功能描述：
 
@@ -603,7 +674,14 @@ V2 前置条件：
 
 当前偏差：
 
-- 现有代码有 `QuietErrorHold` 和错误分类，但缺少完整 6 秒 timer、auto-skip limit、runtime failed set 和用户操作取消机制。
+- 已修复核心状态机偏差：
+  - content keep-quiet failure 进入 `quiet_error_hold`。
+  - `playbackd` 内部 6 秒后自动尝试下一首。
+  - 连续 content auto-skip 上限为 3，超过后停止并退出 Quiet Mode。
+  - 用户显式控制命令会取消 pending auto-skip。
+  - 失败曲目会从 recent history 回滚，避免污染播放历史。
+- `PLAYBACK_FAILED` 已补齐 `auto_skip_after_ms` / `queue_entry_id` 扩展字段。
+- 尚未 live T4 验证真实坏文件恢复路径。
 
 骨架框架：
 
@@ -638,11 +716,27 @@ V2 前置条件：
 - 连续坏文件最多跳 3 次。
 - 用户点击 stop 后不会再自动切歌。
 
+已验证：
+
+- `cargo fmt`
+- `cargo test -p playbackd`
+  - 包含 content auto-skip advance 测试。
+  - 包含连续 content failure 上限测试。
+  - 包含失败曲目 history rollback 测试。
+- `cargo test -p ipc-proto`
+  - 覆盖 `PLAYBACK_FAILED` 扩展字段 round-trip。
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未用真实坏文件验证 WebUI / sessiond / playbackd 联动。
+
 ### REQ-P1-003：设置系统写入和重启生效契约
 
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：本地闭环已落地，2026-05-05；尚未 live T4 验证
 
 功能描述：
 
@@ -652,9 +746,15 @@ V2 前置条件：
 
 当前偏差：
 
-- `controld` 只读 config。
-- config parse failure 只写 log，不进入 UI。
-- `ssh_enabled` 更多是展示字段，不驱动服务开关。
+- 已修复：
+  - `GET /api/v1/settings` 可读取当前 settings。
+  - `POST /api/v1/settings` 支持 validate-only。
+  - `POST /api/v1/settings` 在 `commit=true` 时才 atomic 写入 committed config。
+  - `mode` / `interface_mode` / `dsd_output_policy` 变更会返回 `requires_reboot=true`。
+  - `POST /api/v1/system/reboot-request` 已有安全占位；默认不执行真实 reboot。
+  - config parse failure warning 已进入首页 summary 和设置页。
+  - 设置页表单已接入 validate -> confirm -> commit。
+  - `ssh_enabled` commit 时通过 `/usr/libexec/lumelo/ssh-apply` 调 systemd enable/disable。
 
 骨架框架：
 
@@ -689,21 +789,37 @@ V2 前置条件：
 - 写入坏 config 后服务使用 default 且 UI 告警。
 - SSH 开关能实际改变 service enablement。
 
+已验证：
+
+- `go test ./...` in `services/controld`
+  - validate-only 不写 config。
+  - `commit=true` atomic 写 config。
+  - `settings.Load()` 能读回 committed config。
+  - settings page route 仍可渲染。
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未设置页人工回归。
+- 尚未在 T4 上验证 SSH systemd enable/disable。
+
 ### REQ-P1-004：library command 不越过 playbackd 队列权威
 
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：M1 方向 B 已落地，2026-05-05
 
 功能描述：
 
 - `playbackd` 是队列和播放顺序权威。
 - `controld` 可传递用户上下文，但不应持有随机、repeat、current pointer 等队列语义。
 
-当前偏差：
+当前实现：
 
 - `controld` 读取 library snapshot 后从点击 track 开始拼 track list，再发 `QUEUE_PLAY`。
-- 该行为目前可作为“上下文播放”，但需要边界和长度上限。
+- 该行为在 M1 明确为 candidate list，最大 500 条。
+- `playbackd` 保留当前 order/repeat，并继续作为 play_order 权威。
 
 骨架框架：
 
@@ -733,6 +849,7 @@ V2 前置条件：
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：已修复，2026-05-05
 
 功能描述：
 
@@ -777,6 +894,7 @@ V2 前置条件：
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：最小分类已落地，2026-05-05；UI badge、RAM Window 行为和真机验证未完成
 
 功能描述：
 
@@ -810,11 +928,31 @@ V2 前置条件：
 - 离线曲目不可播放且提示明确。
 - 不触发自动重扫或队列重建。
 
+已修改：
+
+- `ipc-proto` 新增 `PlaybackFailureClass::MediaOffline`，event class 字符串为 `media_offline`。
+- `playbackd`：
+  - `track_volume_unavailable` 归类为 `media_offline`。
+  - `track_file_missing` 归类为 `media_offline`。
+  - `media_offline` 走 fail-stop，不进入 content auto-skip。
+
+已验证：
+
+- `cargo fmt`
+- `cargo test -p ipc-proto -p playbackd -p sessiond`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未真机拔 TF / USB 验证。
+- WebUI offline badge 尚未补齐。
+
 ### REQ-P1-007：RAM Window Playback design lock
 
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：设计已锁定，2026-05-05；MVP 实现放入 M2
 
 功能描述：
 
@@ -834,12 +972,34 @@ V2 前置条件：
 
 实现方向：
 
-1. 决定缓存原始文件还是 decoded PCM。
-2. 决定单曲最大缓存大小和总内存预算。
-3. 决定超大文件降级策略。
-4. 决定 DSD 是否进入 RAM Window。
-5. 决定介质拔出后 current/next 的继续播放语义。
-6. 明确 `aplay path` 是否只是临时 transport。
+1. 缓存对象：
+   - M2 MVP 缓存原始文件 bytes，不缓存 decoded PCM。
+   - WAV/FLAC/MP3/OGG/DSF/DFF 都先作为 raw-file source 进入 RAM Window。
+   - 解码仍由 transport 层从 RAM-backed reader / temp RAM file / pipe 获取。
+2. Window 范围：
+   - M2 MVP 做 `current + next`。
+   - `prev/current/next` 作为 M3 或 V1 release hardening 目标，不挤进 M2 MVP。
+3. 内存预算：
+   - 默认总预算 512 MiB。
+   - 单曲默认上限 256 MiB。
+   - 可通过后续 config 覆盖，但 M2 初版不暴露 UI。
+4. 超大文件降级：
+   - 文件大小超过单曲上限时，不进入 RAM Window。
+   - 降级必须显式记录 `ram_window=streaming_fallback` diagnostics。
+   - 降级路径仍必须走 pipe / reader transport，不能回到无法确认 first-frame 的 direct `aplay path`。
+5. DSD：
+   - DSD raw file 可进入 RAM Window。
+   - Native DSD / DoP transport 仍由当前 DSD planner 决定。
+6. media offline：
+   - 若 current 已完整驻留 RAM，介质拔出后 current 可继续播放。
+   - 若 next 已完整驻留 RAM，下一首可由 `playbackd` 继续播放。
+   - 未驻留 RAM 的离线曲目必须 `media_offline` fail-stop，不自动重扫、不重建队列。
+7. event timing：
+   - `PLAYBACK_STARTED` 仍以第一帧写入 transport 后为准。
+   - RAM preload 完成不等于 playback started。
+8. transport 口径：
+   - direct `aplay <path>` 不再作为正式路径。
+   - 正式路径必须支持 first-frame notifier。
 
 验收：
 
@@ -847,11 +1007,26 @@ V2 前置条件：
 - `PLAYBACK_STARTED` 首帧语义不再依赖无法验证的 direct path 假设。
 - media offline 状态机与 RAM Window 行为一致。
 
+M2 MVP 开发边界：
+
+- 新增 `playbackd::ram_window` 模块。
+- 输入：当前 `QueueSnapshot`、当前 index、track resolver。
+- 输出：`RamWindowSource { track_uid, source_kind, size_bytes, residency }`。
+- source kind 初版：
+  - `RamBytes`
+  - `StreamingFallback`
+- preload 策略：
+  - `current` 同步准备，失败则进入现有 failure path。
+  - `next` 后台准备，但不高频轮询，不阻塞当前播放。
+- diagnostics：
+  - status 或后续 API 需要能看见 current/next residency。
+
 ### REQ-P1-008：最低 runtime 权限边界
 
 类型：requirement
 优先级：P1
 所属里程碑：M1
+状态：最小 runtime 边界已落地，2026-05-05；non-root service / full hardening 属 M3
 
 功能描述：
 
@@ -884,6 +1059,33 @@ V2 前置条件：
 - 非授权本地用户不能直接写 playback command socket。
 - core services 可正常互通。
 - runtime/state/cache 目录权限可被离线检查脚本验证。
+
+已修改：
+
+- `controld`：
+  - HTTP server 增加 `ReadHeaderTimeout` / `ReadTimeout` / `WriteTimeout` / `IdleTimeout`。
+  - mutating request body 默认限制为 1 MiB。
+  - Web SSE playback event subscribers 限制为 8。
+- `playbackd`：
+  - `/run/lumelo` socket dir 创建后设置为 `0750`。
+  - command / event UDS socket 设置为 `0660`。
+  - playback event subscribers 限制为 16。
+- rootfs：
+  - 新增 `/etc/tmpfiles.d/lumelo.conf`
+  - `/run/lumelo`、`/var/lib/lumelo`、`/var/cache/lumelo` 默认 `0750 root root`。
+  - core service `RuntimeDirectoryMode` / `StateDirectoryMode` 收到 `0750`。
+  - image verify 增加 tmpfiles、runtime mode、SSH helper 检查。
+
+已验证：
+
+- `go test ./...` in `services/controld`
+- `cargo fmt`
+- `cargo test -p playbackd`
+
+尚未验证：
+
+- 尚未 live T4 runtime update。
+- 尚未做 non-root service / systemd hardening。
 
 ### REQ-P1-009：曲库本地介质管理入口
 
@@ -1088,6 +1290,7 @@ V2 前置条件：
 优先级：P0
 所属里程碑：M1
 关联需求：REQ-P0-002
+状态：已修复，2026-05-05；尚未 live T4 ALSA 验证
 
 现象：
 
@@ -1107,6 +1310,7 @@ V2 前置条件：
 优先级：P0
 所属里程碑：M1
 关联需求：REQ-P0-001
+状态：已修复，2026-05-05；尚未 live T4 验证
 
 现象：
 
@@ -1133,6 +1337,7 @@ V2 前置条件：
 优先级：P0
 所属里程碑：M1
 关联需求：REQ-P0-003
+状态：已修复，2026-05-05；尚未 live T4 验证
 
 现象：
 
@@ -1151,6 +1356,7 @@ V2 前置条件：
 优先级：P0
 所属里程碑：M1
 关联需求：REQ-P0-001
+状态：已修复，2026-05-05；尚未 live T4 验证
 
 现象：
 
@@ -1234,6 +1440,7 @@ V2 前置条件：
 
 优先级：P1
 所属里程碑：M1
+状态：已修复，2026-05-05
 
 现象：
 
@@ -1250,15 +1457,22 @@ V2 前置条件：
 - 移除 local-mode 对 `media-indexd.service` 的直接 Wants。
 - 若需要开机 schema 初始化，拆独立 oneshot，例如 `lumelo-library-init.service`。
 
+已修改：
+
+- `local-mode.target` 移除 `media-indexd.service` direct `Wants/After`。
+- `verify-t4-lumelo-rootfs-image.sh` 改为验证 local target 不直接包含 `media-indexd.service`。
+
 ### BUG-P1-002：`QUEUE_PLAY` 重置 order/repeat
 
 优先级：P1
 所属里程碑：M1
 关联需求：REQ-P1-001
+状态：已修复，2026-05-05；已有 `playbackd` tests 覆盖 order/repeat 保留
 
 现象：
 
-- `QUEUE_PLAY` 当前将 `order_mode` 重置为 sequential，将 `repeat_mode` 重置为 off。
+- 历史偏差：`QUEUE_PLAY` 曾经将 `order_mode` 重置为 sequential，将 `repeat_mode` 重置为 off。
+- 当前实现已保留现有 order/repeat。
 
 影响：
 
@@ -1274,6 +1488,7 @@ V2 前置条件：
 优先级：P1
 所属里程碑：M1
 关联需求：REQ-P1-003
+状态：已修复，2026-05-05
 
 现象：
 
@@ -1292,6 +1507,7 @@ V2 前置条件：
 
 优先级：P1
 所属里程碑：M1
+状态：已修复，2026-05-05
 
 现象：
 
@@ -1316,6 +1532,7 @@ V2 前置条件：
 优先级：P1
 所属里程碑：M1
 关联需求：REQ-P1-002
+状态：核心状态机已修复，2026-05-05；真机验证未完成
 
 现象：
 
@@ -1333,6 +1550,7 @@ V2 前置条件：
 
 优先级：P1
 所属里程碑：M1
+状态：已修复，2026-05-05
 
 现象：
 
@@ -1355,6 +1573,7 @@ V2 前置条件：
 优先级：P1
 所属里程碑：M1
 关联需求：REQ-P1-002 / REQ-P1-005
+状态：已修复，2026-05-05；history 写入已收紧到 first-frame 后
 
 现象：
 
@@ -1432,7 +1651,7 @@ V2 前置条件：
 
 - V1 只展示当前连接的 USB Audio 解码器，并在播放时自动选择当前唯一 USB Audio DAC。
 - 多解码器列表、选择、持久化、udev sound event scan 放入 V2。
-- 规划继续维护在 [Audio_Output_Device_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Audio_Output_Device_Plan.md)。
+- 规划继续维护在 [Product_Development_Manual.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Product_Development_Manual.md) 的 `Audio Output Contract` 中。
 
 ### Bridge Mode 真功能
 

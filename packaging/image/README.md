@@ -23,7 +23,8 @@ Current smoke builder strategy:
 - reuse the official FriendlyELEC boot chain and partition layout
 - remaster only the `rootfs` partition of the selected SD image
 - inject `Lumelo` binaries plus `base/rootfs/overlay`
-- enable `local-mode.target`
+- enable `lumelo-mode-manager.service`
+- let mode manager start `local-mode.target` or the V1 `bridge-mode.target` placeholder from `/etc/lumelo/config.toml`
 - enable wired DHCP via `systemd-networkd` when available
 
 This is intentionally a bring-up shortcut for the first TF image.

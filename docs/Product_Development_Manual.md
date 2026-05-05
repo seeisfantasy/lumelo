@@ -6,7 +6,7 @@
 > - 每天真实发生的开发过程和阶段变化看 [Development_Progress_Log.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Progress_Log.md)。
 > - 手机 APK 当前状态、结构和后续计划看 [Android_Provisioning_App_Progress.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Android_Provisioning_App_Progress.md)。
 > - 经典蓝牙配网协议、安全传输和板端交互契约看 [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)。
-> - T4 板级无线金样与当前差异看 [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)。
+> - T4 板级无线金样、当前差异和真机核查看 [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md) 与 [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)。
 
 ## 1. 产品定义
 
@@ -681,8 +681,15 @@ V1 的稳定服务边界如下：
 - 不自行更新当前播放指针
 - 不持有队列状态权威
 - 不要求 UI 布局变化同步改 Rust 服务语义
-- 当前 WebUI 的视觉方向与信息架构规划，统一维护在：
-  - [WebUI_Design_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_Design_Plan.md)
+
+WebUI contract：
+
+- 当前 WebUI 不是独立 frontend app；它由 `controld` 内嵌 SSR templates、static files、少量原生 JS 和 `/api/v1/...` JSON / SSE 组成。
+- 不新增单独 frontend daemon，不新增第二个监听端口，不引入 SPA 构建链。
+- UI 重构应优先只影响 `templates`、CSS、浏览器侧 JS 和 `controld` 的薄 API adapter。
+- 产品方向是 `music player first, diagnostics second`：首页和曲库优先呈现播放、曲库和当前输出状态；配网、日志和 bring-up 信息必须可查，但不压过播放器主界面。
+- 不做假的功能入口：未实现的歌词、进度条、radio、全屏 Now Playing、歌单等不能只做 UI 壳。
+- 页面只消费 domain-oriented data，不把按钮文案、布局细节或旧模板字段写进底层 API 语义。
 
 ### `media-indexd`
 
@@ -948,7 +955,7 @@ V1 明确不持久化：
 更细的现场核查步骤、无线金样差异和配网协议细节，统一分别维护在：
 
 - [T4_Bringup_Checklist.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_Bringup_Checklist.md)
-- [T4_WiFi_Golden_Baseline.md](/Volumes/SeeDisk/Codex/Lumelo/docs/T4_WiFi_Golden_Baseline.md)
+- [Development_Environment_README.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Development_Environment_README.md)
 - [Provisioning_Protocol.md](/Volumes/SeeDisk/Codex/Lumelo/docs/Provisioning_Protocol.md)
 
 ## 22. 状态机契约
@@ -1108,7 +1115,7 @@ Quiet Mode 服务切换 contract：
 
 本章定义模块之间“谁拥有语义、谁只是转发”的边界。
 
-具体 JSON 字段可在 [WebUI_API_Contract_Plan.md](/Volumes/SeeDisk/Codex/Lumelo/docs/WebUI_API_Contract_Plan.md) 中细化，但不得违反本章。
+具体 JSON 字段可以随实现扩展，但不得违反本章。
 
 ### 23.1 Service Authority Matrix
 
@@ -1191,7 +1198,36 @@ WebUI 行为 contract：
 - 首页不得提前暴露 shuffle 后续顺序。
 - transport 主按钮必须随状态显示 `播放` / `暂停`，并保留 `停止`。
 
-### 23.4 Library API Contract
+### 23.4 Audio Output Contract
+
+V1 只支持“自动选择当前唯一 USB Audio DAC”，不支持多 DAC 手动选择。
+
+V1 UI / API：
+
+- 设置页显示 `当前解码器` 下拉框。
+- 未发现 USB Audio 解码器时显示 `未连接`。
+- 发现唯一 USB Audio 解码器时显示当前解码器名称。
+- 当前只读 API 为 `GET /api/v1/system/audio-output`。
+
+V1 播放语义：
+
+- `playbackd` 每次开始播放前读取当前 `/proc/asound/cards`。
+- 只把 `USB-Audio` ALSA card 视为 V1 自动输出候选。
+- 发现唯一 USB Audio DAC 时使用当前设备，例如 `plughw:CARD=<detected>,DEV=0`。
+- 未发现 USB Audio DAC 时必须 fail-fast，返回 `audio_output_unavailable`。
+- 同时发现多个 USB Audio DAC 时必须 fail-fast，返回 `audio_output_ambiguous`。
+- 不允许假装进入播放后再自动变成 stopped。
+- 不做隐式 fallback，不自动切换到另一个 DAC。
+
+V2 多 DAC 选择预留：
+
+- 用 `udev` 只在 `sound` 设备 `add/remove` 时触发一次扫描。
+- 不用高频轮询 USB 口。
+- helper 写入 `/run/lumelo/audio-output-status.json` 这类轻量 runtime 状态。
+- 当前选中 DAC 断开时进入 `未连接 / 输出不可用`，播放链按 fail-stop 处理。
+- 选择持久化、稳定 device key、播放中切换策略必须在 V2 开工前确认。
+
+### 23.5 Library API Contract
 
 曲库 API 不得把大曲库一次性无上限塞给浏览器。
 
@@ -1208,7 +1244,7 @@ WebUI 行为 contract：
 - 文件夹过滤必须正确处理 `%` / `_` 等 LIKE 特殊字符。
 - WebUI 不应自行维护一套与后端不一致的可播放扩展名判断。
 
-### 23.5 Auth / Security Contract
+### 23.6 Auth / Security Contract
 
 V1 安全模型：
 
@@ -1249,7 +1285,7 @@ Endpoint profile：
 - recovery 生效后删除 auth state，并重新进入 first setup。
 - recovery 不应清空音乐库和用户媒体。
 
-### 23.6 Rootfs / systemd Contract
+### 23.7 Rootfs / systemd Contract
 
 核心服务：
 
